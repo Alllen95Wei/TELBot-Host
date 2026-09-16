@@ -351,17 +351,15 @@ class Packet:
 
     @classmethod
     def create_telemetry(
-        cls, battery_mv: int, enc_lf: int = 0, enc_rf: int = 0, status_flags: int = 0, seq: int = 0
+        cls, angle_steps: int = 0, status_flags: int = 0, seq: int = 0
     ) -> "Packet":
         """
-        Packs sensor telemetry from Pico to Host:
-        battery_mv: uint16 in millivolts (e.g. 12400 for 12.4V)
-        enc_lf: int16 left front/side encoder
-        enc_rf: int16 right front/side encoder
-        status_flags: uint8 bitmask (e.g. bit 0 = chassis enabled, bit 1 = shooter running)
+        Packs shooter TB6560 step telemetry from Pico to Host (<iB):
+        angle_steps: int32 cumulative TB6560 stepper step count
+        status_flags: uint8 bitmask (e.g. bit 0 = active / not stopped)
         """
-        payload = struct.pack("<HhhB", battery_mv, enc_lf, enc_rf, status_flags)
-        return cls(cmd=CmdType.TELEMETRY, part=PartType.SENSORS, payload=payload, seq=seq)
+        payload = struct.pack("<iB", int(angle_steps), int(status_flags) & 0xFF)
+        return cls(cmd=CmdType.TELEMETRY, part=PartType.SHOOTER, payload=payload, seq=seq)
 
     def parse_telemetry(self) -> dict:
         """
@@ -369,7 +367,11 @@ class Packet:
         Supports:
           - 18-byte ESP32 sensor frame (<hhhIII):
               (upper_rpm, lower_rpm, heading_deg, dist_front_mm, dist_right_mm, dist_left_mm)
-          - 7-byte Pico telemetry frame (<HhhB):
+          - 5-byte Pico shooter step frame (<iB):
+              (angle_steps, status_flags)
+          - 4-byte Pico shooter step frame (<i):
+              (angle_steps,)
+          - 7-byte legacy Pico telemetry frame (<HhhB):
               (battery_mv, enc_lf, enc_rf, status_flags)
         """
         if len(self.payload) == self.ESP32_TELEMETRY_SIZE:
@@ -396,6 +398,21 @@ class Packet:
                 "dist_right_cm": round(dist_right_mm / 10.0, 1) if right_valid else None,
                 "dist_left_cm": round(dist_left_mm / 10.0, 1) if left_valid else None,
             }
+        if len(self.payload) == 5:
+            angle_steps, status = struct.unpack("<iB", self.payload)
+            return {
+                "source": "pico",
+                "angle_steps": int(angle_steps),
+                "shooter_steps": int(angle_steps),
+                "status_flags": int(status),
+            }
+        if len(self.payload) == 4:
+            (angle_steps,) = struct.unpack("<i", self.payload)
+            return {
+                "source": "pico",
+                "angle_steps": int(angle_steps),
+                "shooter_steps": int(angle_steps),
+            }
         if len(self.payload) == 7:
             battery_mv, enc_lf, enc_rf, status = struct.unpack("<HhhB", self.payload)
             return {
@@ -407,7 +424,7 @@ class Packet:
                 "status_flags": status,
             }
         raise ValueError(
-            f"Telemetry payload expected {self.ESP32_TELEMETRY_SIZE} (ESP32) or 7 (Pico) bytes, "
+            f"Telemetry payload expected {self.ESP32_TELEMETRY_SIZE} (ESP32) or 4/5/7 (Pico) bytes, "
             f"got {len(self.payload)}"
         )
 
@@ -975,16 +992,14 @@ if __name__ == "__main__":
     print(f"Conveyor Packet OK: {dec_conveyor}")
 
     # 4. Test Telemetry Packet
-    pkt_telemetry = Packet.create_telemetry(battery_mv=12450, enc_lf=1024, enc_rf=-1020, status_flags=0b0101, seq=13)
+    pkt_telemetry = Packet.create_telemetry(angle_steps=-340, status_flags=0b0001, seq=13)
     raw_telemetry = pkt_telemetry.encode()
     dec_telemetry = Packet.decode(raw_telemetry)
     assert dec_telemetry is not None
     telem_data = dec_telemetry.parse_telemetry()
-    assert telem_data["battery_mv"] == 12450
-    assert telem_data["battery_v"] == 12.45
-    assert telem_data["enc_lf"] == 1024
-    assert telem_data["enc_rf"] == -1020
-    assert telem_data["status_flags"] == 5
+    assert telem_data["angle_steps"] == -340
+    assert telem_data["shooter_steps"] == -340
+    assert telem_data["status_flags"] == 1
     print(f"Telemetry Packet OK: {telem_data}")
 
     # 5. Test Priority Queue & Purging
