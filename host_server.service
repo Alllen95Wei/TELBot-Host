@@ -1,0 +1,18 @@
+[Unit]
+Description=TEL Bot server
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/TELBot-Host
+ExecStart=/home/ubuntu/TELBot-Host/start_server.sh
+
+Restart=always
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+
