@@ -30,6 +30,10 @@ body {
   animation: pulse-estop 1.2s infinite ease-in-out;
 }
 
+#estop-web-alert-banner {
+  cursor: pointer;
+}
+
 @keyframes pulse-estop {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.78; }

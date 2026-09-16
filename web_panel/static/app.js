@@ -64,6 +64,10 @@ const BUTTON_ACTIONS = [
 
 const STORAGE_KEY = "telbot_controller_mapping_v1";
 
+const WS_INTERVAL_MS = 20;
+
+let WEB_ESTOP = false;
+
 function getDefaultMapping() {
   return {
     deadzonePct: 8,
@@ -175,10 +179,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   initFieldPoseMap();
   initWebSocket();
   initStatusPolling();
+  initWebEStop();
   await initWebHID();
 
-  // 25 Hz (40 ms) real-time control loop
-  setInterval(controlTick, 40);
+  // Real-time control loop
+  setInterval(controlTick, WS_INTERVAL_MS);
 });
 
 // ============================================================================
@@ -631,7 +636,7 @@ function initWebSocket() {
 }
 
 function sendWsJson(payload) {
-  if (ws && wsConnected && ws.readyState === WebSocket.OPEN) {
+  if (ws && wsConnected && ws.readyState === WebSocket.OPEN && !WEB_ESTOP) {
     ws.send(JSON.stringify(payload));
   }
 }
@@ -733,7 +738,7 @@ function controlTick() {
     }
   }
 
-  if (!controlArmed || !wsConnected) return;
+  if (!controlArmed || !wsConnected || WEB_ESTOP) return;
 
   // Send drive continuously while connected or when transitioning back to 0
   if (
@@ -852,6 +857,26 @@ function initThemeToggle() {
     const isDark = document.body.classList.toggle("dark");
     document.body.classList.toggle("light", !isDark);
     icon.textContent = isDark ? "light_mode" : "dark_mode";
+  });
+}
+
+function initWebEStop() {
+  const root = document.getElementsByTagName("html")[0];
+  const banner = document.getElementById("estop-web-alert-banner")
+
+  root.addEventListener("keydown", (evt) => {
+    if (evt.code === "Space") {
+      evt.preventDefault();
+      sendEmergencyStop();
+      WEB_ESTOP = true;  // Toggle WEB_ESTOP before sending E-Stop to prevent WS stopped too early
+      document.getElementById("estop-web-alert-banner").style.display = "flex";
+    }
+  });
+  banner.addEventListener("click", () => {
+    if (confirm("Are you sure you want to unlock the Web E-Stop?")) {
+      WEB_ESTOP = false;
+      document.getElementById("estop-web-alert-banner").style.display = "none";
+    }
   });
 }
 
