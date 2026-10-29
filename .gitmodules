@@ -1,0 +1,3 @@
+[submodule "slave"]
+	path = slave
+	url = https://github.com/Alllen95Wei/TELBot-Slave.git
