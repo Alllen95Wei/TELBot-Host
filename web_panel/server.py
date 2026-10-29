@@ -71,7 +71,6 @@ class DriveRequest(BaseModel):
 class ShooterRequest(BaseModel):
     flywheel: int = Field(default=0, ge=-1000, le=1000, description="Flywheel speed (-1000 to +1000)")
     angle: int = Field(default=0, ge=-1000, le=1000, description="Pitch angle adjustment speed (-1000 to +1000)")
-    spinner: int = Field(default=0, ge=-1000, le=1000, description="Feeder spinner speed (-1000 to +1000)")
 
 
 class ShooterFlywheelRequest(BaseModel):
@@ -79,7 +78,18 @@ class ShooterFlywheelRequest(BaseModel):
 
 
 class ConveyorRequest(BaseModel):
-    speed: int = Field(default=0, ge=-1000, le=1000, description="Conveyor / feeder belt speed (-1000 to +1000)")
+    trigger: int = Field(default=0, ge=-1000, le=1000, description="Trigger motor speed (-1000 to +1000)")
+    spinner_run: bool = Field(default=False, description="Whether feeder spinner is running")
+    spinner_reversed: bool = Field(default=False, description="Whether spinner direction is reversed")
+
+
+class ConveyorTriggerRequest(BaseModel):
+    speed: int = Field(default=0, ge=-1000, le=1000, description="Trigger motor speed (-1000 to +1000)")
+
+
+class ConveyorSpinnerRequest(BaseModel):
+    run: bool = Field(default=True, description="Whether feeder spinner is running")
+    reversed: bool = Field(default=False, description="Whether spinner direction is reversed")
 
 
 class StopRequest(BaseModel):
@@ -129,18 +139,17 @@ def drive_robot(req: DriveRequest):
 @app.post("/api/shooter")
 def control_shooter(req: ShooterRequest):
     """
-    Controls all shooter components: flywheels, pitch angle adjustment, and feeder spinner.
+    Controls shooter flywheels and pitch angle adjustment.
     """
     if not uart.is_running:
         raise HTTPException(status_code=503, detail="UART communicator is not running")
 
-    uart.send_shooter_command(flywheel=req.flywheel, angle=req.angle, spinner=req.spinner)
+    uart.send_shooter_command(flywheel=req.flywheel, angle=req.angle)
     return {
         "status": "enqueued",
         "subsystem": "shooter",
         "flywheel": req.flywheel,
         "angle": req.angle,
-        "spinner": req.spinner,
     }
 
 
@@ -159,13 +168,52 @@ def control_shooter_flywheel(req: ShooterFlywheelRequest):
 @app.post("/api/conveyor")
 def control_conveyor(req: ConveyorRequest):
     """
-    Controls the conveyor / ball feeder motor.
+    Controls all conveyor components: trigger motor speed and spinner state (run, reversed).
     """
     if not uart.is_running:
         raise HTTPException(status_code=503, detail="UART communicator is not running")
 
-    uart.send_conveyor(speed=req.speed)
-    return {"status": "enqueued", "subsystem": "conveyor", "speed": req.speed}
+    uart.send_conveyor_command(
+        trigger=req.trigger,
+        spinner_run=req.spinner_run,
+        spinner_reversed=req.spinner_reversed,
+    )
+    return {
+        "status": "enqueued",
+        "subsystem": "conveyor",
+        "trigger": req.trigger,
+        "spinner_run": req.spinner_run,
+        "spinner_reversed": req.spinner_reversed,
+    }
+
+
+@app.post("/api/conveyor/trigger")
+def control_conveyor_trigger(req: ConveyorTriggerRequest):
+    """
+    Sets only the conveyor trigger motor speed.
+    """
+    if not uart.is_running:
+        raise HTTPException(status_code=503, detail="UART communicator is not running")
+
+    uart.send_conveyor_trigger(speed=req.speed)
+    return {"status": "enqueued", "subsystem": "conveyor", "trigger": req.speed}
+
+
+@app.post("/api/conveyor/spinner")
+def control_conveyor_spinner(req: ConveyorSpinnerRequest):
+    """
+    Sets only the conveyor spinner state (run: bool, reversed: bool).
+    """
+    if not uart.is_running:
+        raise HTTPException(status_code=503, detail="UART communicator is not running")
+
+    uart.send_conveyor_spinner(run=req.run, reversed=req.reversed)
+    return {
+        "status": "enqueued",
+        "subsystem": "conveyor",
+        "spinner_run": req.run,
+        "spinner_reversed": req.reversed,
+    }
 
 
 @app.post("/api/stop")
@@ -194,8 +242,8 @@ async def websocket_control(websocket: WebSocket):
     WebSocket endpoint for real-time WebHID / Gamepad input stream.
     Receives JSON messages such as:
       {"type": "drive", "vx": 300, "vy": 0, "omega": -100}
-      {"type": "shooter", "flywheel": 800, "angle": 0, "spinner": 1000}
-      {"type": "conveyor", "speed": 500}
+      {"type": "shooter", "flywheel": 800, "angle": 0}
+      {"type": "conveyor", "trigger": 500, "spinner_run": true, "spinner_reversed": false}
       {"type": "stop", "part": 0}
     """
     await websocket.accept()
@@ -214,12 +262,17 @@ async def websocket_control(websocket: WebSocket):
             elif msg_type == "shooter":
                 flywheel = int(data.get("flywheel", 0))
                 angle = int(data.get("angle", 0))
-                spinner = int(data.get("spinner", 0))
-                uart.send_shooter_command(flywheel=flywheel, angle=angle, spinner=spinner)
+                uart.send_shooter_command(flywheel=flywheel, angle=angle)
 
             elif msg_type == "conveyor":
-                speed = int(data.get("speed", 0))
-                uart.send_conveyor(speed=speed)
+                trigger = int(data.get("trigger", 0))
+                spinner_run = bool(data.get("spinner_run", False))
+                spinner_reversed = bool(data.get("spinner_reversed", False))
+                uart.send_conveyor_command(
+                    trigger=trigger,
+                    spinner_run=spinner_run,
+                    spinner_reversed=spinner_reversed,
+                )
 
             elif msg_type == "stop":
                 part_val = int(data.get("part", PartType.ALL.value))
