@@ -205,15 +205,14 @@ class Packet:
     # --- Shooter Subsystem (PartType.SHOOTER) ---
     @classmethod
     def create_shooter_command(
-        cls, flywheel: int, angle: int = 0, spinner: int = 0, seq: int = 0
+        cls, flywheel: int, angle: int = 0, seq: int = 0
     ) -> "Packet":
         """
-        Full control of Shooter subsystem:
+        Control of Shooter subsystem:
         flywheel: flywheel velocity (-1000 to +1000)
         angle: motorized pitch angle speed (-1000 to +1000)
-        spinner: feeder spinner speed (-1000 to +1000)
         """
-        payload = struct.pack("<hhh", flywheel, angle, spinner)
+        payload = struct.pack("<hh", flywheel, angle)
         return cls(cmd=CmdType.RUN, part=PartType.SHOOTER, payload=payload, seq=seq)
 
     @classmethod
@@ -222,31 +221,64 @@ class Packet:
         payload = struct.pack("<h", speed)
         return cls(cmd=CmdType.RUN, part=PartType.SHOOTER, payload=payload, seq=seq)
 
-    def parse_shooter_command(self) -> Tuple[int, int, int]:
+    def parse_shooter_command(self) -> Tuple[int, int]:
         """
         Unpacks shooter command.
-        If payload has 6 bytes: returns (flywheel, angle, spinner).
-        If payload has 2 bytes: returns (flywheel, 0, 0).
+        If payload has 4 bytes: returns (flywheel, angle).
+        If payload has 2 bytes: returns (flywheel, 0).
         """
-        if len(self.payload) == 6:
-            return struct.unpack("<hhh", self.payload)
+        if len(self.payload) == 4:
+            return struct.unpack("<hh", self.payload)
         elif len(self.payload) == 2:
             (flywheel,) = struct.unpack("<h", self.payload)
-            return (flywheel, 0, 0)
-        raise ValueError(f"Shooter payload expected 2 or 6 bytes, got {len(self.payload)}")
+            return (flywheel, 0)
+        raise ValueError(f"Shooter payload expected 2 or 4 bytes, got {len(self.payload)}")
 
     # --- Conveyor Subsystem (PartType.CONVEYOR) ---
     @classmethod
-    def create_conveyor_drive(cls, speed: int, seq: int = 0) -> "Packet":
-        """Sets conveyor/feeder motor speed (-1000 to +1000)."""
+    def create_conveyor_command(
+        cls, trigger: int, spinner_run: bool = False, spinner_reversed: bool = False, seq: int = 0
+    ) -> "Packet":
+        """
+        Full control of Conveyor subsystem:
+        trigger: trigger motor velocity (-1000 to +1000)
+        spinner_run: whether feeder spinner is running
+        spinner_reversed: whether spinner rotation direction is reversed
+        """
+        payload = struct.pack("<h??", trigger, spinner_run, spinner_reversed)
+        return cls(cmd=CmdType.RUN, part=PartType.CONVEYOR, payload=payload, seq=seq)
+
+    @classmethod
+    def create_conveyor_trigger(cls, speed: int, seq: int = 0) -> "Packet":
+        """Sets conveyor trigger motor speed only (-1000 to +1000)."""
         payload = struct.pack("<h", speed)
         return cls(cmd=CmdType.RUN, part=PartType.CONVEYOR, payload=payload, seq=seq)
 
-    def parse_conveyor_drive(self) -> int:
-        """Unpacks conveyor speed (-1000 to +1000)."""
-        if len(self.payload) != 2:
-            raise ValueError(f"Conveyor payload expected 2 bytes, got {len(self.payload)}")
-        return struct.unpack("<h", self.payload)[0]
+    @classmethod
+    def create_conveyor_spinner(
+        cls, run: bool = True, reversed: bool = False, seq: int = 0
+    ) -> "Packet":
+        """Sets conveyor spinner state only (run: bool, reversed: bool)."""
+        payload = struct.pack("<??", run, reversed)
+        return cls(cmd=CmdType.RUN, part=PartType.CONVEYOR, payload=payload, seq=seq)
+
+    def parse_conveyor_command(self) -> Tuple[int, bool, bool]:
+        """
+        Unpacks conveyor command.
+        If payload has 4 bytes (<h??): returns (trigger, spinner_run, spinner_reversed).
+        If payload has 2 bytes (<h): returns (trigger, False, False).
+        If payload has 2 bytes (<??): returns (0, spinner_run, spinner_reversed).
+        """
+        if len(self.payload) == 4:
+            return struct.unpack("<h??", self.payload)
+        elif len(self.payload) == 2:
+            try:
+                (trigger,) = struct.unpack("<h", self.payload)
+                return (trigger, False, False)
+            except struct.error:
+                run, rev = struct.unpack("<??", self.payload)
+                return (0, run, rev)
+        raise ValueError(f"Conveyor payload expected 2 or 4 bytes, got {len(self.payload)}")
 
     # --- Sensor Telemetry (PartType.SENSORS) ---
     @classmethod
@@ -492,10 +524,10 @@ class UARTComm:
         self.send_packet(pkt, priority=priority)
 
     def send_shooter_command(
-        self, flywheel: int, angle: int = 0, spinner: int = 0, priority: int = 2
+        self, flywheel: int, angle: int = 0, priority: int = 2
     ) -> None:
-        """Enqueues a full shooter command (flywheel, angle, spinner)."""
-        pkt = Packet.create_shooter_command(flywheel=flywheel, angle=angle, spinner=spinner)
+        """Enqueues a shooter command (flywheel, angle)."""
+        pkt = Packet.create_shooter_command(flywheel=flywheel, angle=angle)
         self.send_packet(pkt, priority=priority)
 
     def send_shooter_flywheel(self, speed: int, priority: int = 2) -> None:
@@ -503,10 +535,34 @@ class UARTComm:
         pkt = Packet.create_shooter_flywheel(speed=speed)
         self.send_packet(pkt, priority=priority)
 
-    def send_conveyor(self, speed: int, priority: int = 2) -> None:
-        """Enqueues a conveyor/feeder drive command."""
-        pkt = Packet.create_conveyor_drive(speed=speed)
+    def send_conveyor_command(
+        self,
+        trigger: int,
+        spinner_run: bool = False,
+        spinner_reversed: bool = False,
+        priority: int = 2,
+    ) -> None:
+        """Enqueues a full conveyor command (trigger speed, spinner run, spinner reversed)."""
+        pkt = Packet.create_conveyor_command(
+            trigger=trigger, spinner_run=spinner_run, spinner_reversed=spinner_reversed
+        )
         self.send_packet(pkt, priority=priority)
+
+    def send_conveyor_trigger(self, speed: int, priority: int = 2) -> None:
+        """Enqueues a conveyor trigger motor command."""
+        pkt = Packet.create_conveyor_trigger(speed=speed)
+        self.send_packet(pkt, priority=priority)
+
+    def send_conveyor_spinner(
+        self, run: bool = True, reversed: bool = False, priority: int = 2
+    ) -> None:
+        """Enqueues a conveyor spinner command (run: bool, reversed: bool)."""
+        pkt = Packet.create_conveyor_spinner(run=run, reversed=reversed)
+        self.send_packet(pkt, priority=priority)
+
+    def send_conveyor(self, speed: int, priority: int = 2) -> None:
+        """Alias for send_conveyor_trigger."""
+        self.send_conveyor_trigger(speed=speed, priority=priority)
 
     def send_ping(self, priority: int = 1) -> None:
         """Enqueues a keep-alive ping."""
@@ -676,20 +732,20 @@ if __name__ == "__main__":
     assert dec_chassis.parse_chassis_drive() == (500, -200, 100)
     print(f"Chassis Packet OK: {dec_chassis}")
 
-    # 2. Test Shooter Full Command Packet
-    pkt_shooter = Packet.create_shooter_command(flywheel=850, angle=150, spinner=1000, seq=11)
+    # 2. Test Shooter Command Packet
+    pkt_shooter = Packet.create_shooter_command(flywheel=850, angle=150, seq=11)
     raw_shooter = pkt_shooter.encode()
     dec_shooter = Packet.decode(raw_shooter)
     assert dec_shooter is not None
-    assert dec_shooter.parse_shooter_command() == (850, 150, 1000)
+    assert dec_shooter.parse_shooter_command() == (850, 150)
     print(f"Shooter Packet OK: {dec_shooter}")
 
     # 3. Test Conveyor Command Packet
-    pkt_conveyor = Packet.create_conveyor_drive(speed=750, seq=12)
+    pkt_conveyor = Packet.create_conveyor_command(trigger=750, spinner_run=True, spinner_reversed=True, seq=12)
     raw_conveyor = pkt_conveyor.encode()
     dec_conveyor = Packet.decode(raw_conveyor)
     assert dec_conveyor is not None
-    assert dec_conveyor.parse_conveyor_drive() == 750
+    assert dec_conveyor.parse_conveyor_command() == (750, True, True)
     print(f"Conveyor Packet OK: {dec_conveyor}")
 
     # 4. Test Telemetry Packet
