@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "slave"
+		}
+	],
+	"settings": {
+		"git.enableCommitSigning": false
+	}
+}
