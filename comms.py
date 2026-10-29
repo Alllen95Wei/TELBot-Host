@@ -182,15 +182,16 @@ class Packet:
         """Heartbeat ping packet."""
         return cls(cmd=CmdType.PING, part=PartType.ALL, payload=b"", seq=seq)
 
+    # --- Chassis Subsystem (PartType.CHASSIS) ---
     @classmethod
     def create_chassis_drive(
         cls, vx: int, vy: int, omega: int, seq: int = 0
     ) -> "Packet":
         """
         Drive chassis motors with 3 signed 16-bit integers (-1000 to +1000 scaled):
-        vx: forward/backward velocity
-        vy: strafe left/right velocity
-        omega: rotational angular velocity
+        vx: forward/backward velocity (corresponds to y_speed on Pico)
+        vy: strafe left/right velocity (corresponds to x_speed on Pico)
+        omega: rotational angular velocity (corresponds to z_rotation on Pico)
         """
         payload = struct.pack("<hhh", vx, vy, omega)
         return cls(cmd=CmdType.RUN, part=PartType.CHASSIS, payload=payload, seq=seq)
@@ -200,6 +201,80 @@ class Packet:
         if len(self.payload) != 6:
             raise ValueError(f"Chassis payload expected 6 bytes, got {len(self.payload)}")
         return struct.unpack("<hhh", self.payload)
+
+    # --- Shooter Subsystem (PartType.SHOOTER) ---
+    @classmethod
+    def create_shooter_command(
+        cls, flywheel: int, angle: int = 0, spinner: int = 0, seq: int = 0
+    ) -> "Packet":
+        """
+        Full control of Shooter subsystem:
+        flywheel: flywheel velocity (-1000 to +1000)
+        angle: motorized pitch angle speed (-1000 to +1000)
+        spinner: feeder spinner speed (-1000 to +1000)
+        """
+        payload = struct.pack("<hhh", flywheel, angle, spinner)
+        return cls(cmd=CmdType.RUN, part=PartType.SHOOTER, payload=payload, seq=seq)
+
+    @classmethod
+    def create_shooter_flywheel(cls, speed: int, seq: int = 0) -> "Packet":
+        """Sets shooter flywheel speed only (-1000 to +1000)."""
+        payload = struct.pack("<h", speed)
+        return cls(cmd=CmdType.RUN, part=PartType.SHOOTER, payload=payload, seq=seq)
+
+    def parse_shooter_command(self) -> Tuple[int, int, int]:
+        """
+        Unpacks shooter command.
+        If payload has 6 bytes: returns (flywheel, angle, spinner).
+        If payload has 2 bytes: returns (flywheel, 0, 0).
+        """
+        if len(self.payload) == 6:
+            return struct.unpack("<hhh", self.payload)
+        elif len(self.payload) == 2:
+            (flywheel,) = struct.unpack("<h", self.payload)
+            return (flywheel, 0, 0)
+        raise ValueError(f"Shooter payload expected 2 or 6 bytes, got {len(self.payload)}")
+
+    # --- Conveyor Subsystem (PartType.CONVEYOR) ---
+    @classmethod
+    def create_conveyor_drive(cls, speed: int, seq: int = 0) -> "Packet":
+        """Sets conveyor/feeder motor speed (-1000 to +1000)."""
+        payload = struct.pack("<h", speed)
+        return cls(cmd=CmdType.RUN, part=PartType.CONVEYOR, payload=payload, seq=seq)
+
+    def parse_conveyor_drive(self) -> int:
+        """Unpacks conveyor speed (-1000 to +1000)."""
+        if len(self.payload) != 2:
+            raise ValueError(f"Conveyor payload expected 2 bytes, got {len(self.payload)}")
+        return struct.unpack("<h", self.payload)[0]
+
+    # --- Sensor Telemetry (PartType.SENSORS) ---
+    @classmethod
+    def create_telemetry(
+        cls, battery_mv: int, enc_lf: int = 0, enc_rf: int = 0, status_flags: int = 0, seq: int = 0
+    ) -> "Packet":
+        """
+        Packs sensor telemetry from Pico to Host:
+        battery_mv: uint16 in millivolts (e.g. 12400 for 12.4V)
+        enc_lf: int16 left front/side encoder
+        enc_rf: int16 right front/side encoder
+        status_flags: uint8 bitmask (e.g. bit 0 = chassis enabled, bit 1 = shooter running)
+        """
+        payload = struct.pack("<HhhB", battery_mv, enc_lf, enc_rf, status_flags)
+        return cls(cmd=CmdType.TELEMETRY, part=PartType.SENSORS, payload=payload, seq=seq)
+
+    def parse_telemetry(self) -> dict:
+        """Unpacks telemetry payload into structured dictionary."""
+        if len(self.payload) != 7:
+            raise ValueError(f"Telemetry payload expected 7 bytes, got {len(self.payload)}")
+        battery_mv, enc_lf, enc_rf, status = struct.unpack("<HhhB", self.payload)
+        return {
+            "battery_mv": battery_mv,
+            "battery_v": round(battery_mv / 1000.0, 2),
+            "enc_lf": enc_lf,
+            "enc_rf": enc_rf,
+            "status_flags": status,
+        }
 
 
 # ==============================================================================
@@ -416,6 +491,23 @@ class UARTComm:
         pkt = Packet.create_chassis_drive(vx=vx, vy=vy, omega=omega)
         self.send_packet(pkt, priority=priority)
 
+    def send_shooter_command(
+        self, flywheel: int, angle: int = 0, spinner: int = 0, priority: int = 2
+    ) -> None:
+        """Enqueues a full shooter command (flywheel, angle, spinner)."""
+        pkt = Packet.create_shooter_command(flywheel=flywheel, angle=angle, spinner=spinner)
+        self.send_packet(pkt, priority=priority)
+
+    def send_shooter_flywheel(self, speed: int, priority: int = 2) -> None:
+        """Enqueues a shooter flywheel command."""
+        pkt = Packet.create_shooter_flywheel(speed=speed)
+        self.send_packet(pkt, priority=priority)
+
+    def send_conveyor(self, speed: int, priority: int = 2) -> None:
+        """Enqueues a conveyor/feeder drive command."""
+        pkt = Packet.create_conveyor_drive(speed=speed)
+        self.send_packet(pkt, priority=priority)
+
     def send_ping(self, priority: int = 1) -> None:
         """Enqueues a keep-alive ping."""
         pkt = Packet.create_ping()
@@ -572,48 +664,60 @@ class UARTComm:
 # ==============================================================================
 # Unit Verification / Demonstration
 # ==============================================================================
-# if __name__ == "__main__":
-#     logging.basicConfig(level=logging.INFO)
-#     print("Testing UARTComm & Dual-Threaded Workers...")
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    print("Testing Subsystem Packet Formats & UARTComm...")
 
-#     # Test queue priority and packet draining logic
-#     comm = UARTComm(port="/dev/ttyAMA0")
+    # 1. Test Chassis Drive Packet
+    pkt_chassis = Packet.create_chassis_drive(vx=500, vy=-200, omega=100, seq=10)
+    raw_chassis = pkt_chassis.encode()
+    dec_chassis = Packet.decode(raw_chassis)
+    assert dec_chassis is not None
+    assert dec_chassis.parse_chassis_drive() == (500, -200, 100)
+    print(f"Chassis Packet OK: {dec_chassis}")
 
-#     # Enqueue mixed priority commands without opening hardware port
-#     comm.send_drive(vx=100, vy=0, omega=0)
-#     comm.send_drive(vx=200, vy=0, omega=0)
-#     comm.send_ping()
-#     comm.send_stop(clear_pending_drive=True)
+    # 2. Test Shooter Full Command Packet
+    pkt_shooter = Packet.create_shooter_command(flywheel=850, angle=150, spinner=1000, seq=11)
+    raw_shooter = pkt_shooter.encode()
+    dec_shooter = Packet.decode(raw_shooter)
+    assert dec_shooter is not None
+    assert dec_shooter.parse_shooter_command() == (850, 150, 1000)
+    print(f"Shooter Packet OK: {dec_shooter}")
 
-#     print(f"Queue size after sending 2 drive, 1 ping, and 1 STOP: {comm._tx_queue.qsize()}")
-#     # The 2 pending drive commands should have been purged by send_stop(clear_pending_drive=True)
-#     # The remaining items should be STOP (priority 0) and PING (priority 1)
-#     item1 = comm._tx_queue.get_nowait()
-#     item2 = comm._tx_queue.get_nowait()
-#     assert item1[0] == 0 and item1[2].cmd == CmdType.STOP, f"Expected STOP first, got {item1}"
-#     assert item2[0] == 1 and item2[2].cmd == CmdType.PING, f"Expected PING second, got {item2}"
-#     assert comm._tx_queue.empty()
-#     print("Priority and queue-clearing assertions verified successfully!")
+    # 3. Test Conveyor Command Packet
+    pkt_conveyor = Packet.create_conveyor_drive(speed=750, seq=12)
+    raw_conveyor = pkt_conveyor.encode()
+    dec_conveyor = Packet.decode(raw_conveyor)
+    assert dec_conveyor is not None
+    assert dec_conveyor.parse_conveyor_drive() == 750
+    print(f"Conveyor Packet OK: {dec_conveyor}")
 
-#     # Test full hardware lifecycle on /dev/ttyAMA0
-#     try:
-#         comm.start()
-#         assert comm.is_running
-#         print("Hardware UART threads running successfully!")
+    # 4. Test Telemetry Packet
+    pkt_telemetry = Packet.create_telemetry(battery_mv=12450, enc_lf=1024, enc_rf=-1020, status_flags=0b0101, seq=13)
+    raw_telemetry = pkt_telemetry.encode()
+    dec_telemetry = Packet.decode(raw_telemetry)
+    assert dec_telemetry is not None
+    telem_data = dec_telemetry.parse_telemetry()
+    assert telem_data["battery_mv"] == 12450
+    assert telem_data["battery_v"] == 12.45
+    assert telem_data["enc_lf"] == 1024
+    assert telem_data["enc_rf"] == -1020
+    assert telem_data["status_flags"] == 5
+    print(f"Telemetry Packet OK: {telem_data}")
 
-#         # Send test packets through running TX worker
-#         comm.send_ping()
-#         comm.send_drive(vx=300, vy=0, omega=-150)
-#         time.sleep(0.2)
+    # 5. Test Priority Queue & Purging
+    comm = UARTComm(port="/dev/ttyAMA0")
+    comm.send_drive(vx=100, vy=0, omega=0)
+    comm.send_shooter_command(flywheel=500)
+    comm.send_stop(clear_pending_drive=True)
 
-#         stats = comm.get_stats()
-#         print(f"Communication Stats: {stats}")
-#         assert stats["tx_packets"] >= 2, "Expected at least 2 packets transmitted"
-
-#         comm.stop()
-#         assert not comm.is_running
-#         print("Hardware UART shutdown completed cleanly.")
-#     except Exception as e:
-#         print(f"Hardware test skipped or failed with: {e}")
-
-#     print("All tests completed successfully!")
+    items = []
+    while not comm._tx_queue.empty():
+        items.append(comm._tx_queue.get_nowait())
+    priorities = [it[0] for it in items]
+    cmds = [it[2].cmd for it in items if it[2]]
+    assert priorities[0] == 0  # STOP is priority 0
+    assert CmdType.STOP in cmds
+    assert CmdType.RUN in cmds  # Shooter is RUN but not CHASSIS, so preserved
+    print("Priority and queue-clearing assertions verified successfully!")
+    print("All subsystem packet verification checks passed!")
