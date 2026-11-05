@@ -5,7 +5,8 @@ import os
 import sys
 import threading
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Callable, Optional
 
 import gpiod
@@ -309,6 +310,7 @@ class RobotHost:
             host=self.host,
             port=self.port,
             log_level=self.log_level,
+            log_config=None,
         )
         self._uvicorn_server = uvicorn.Server(uv_config)
 
@@ -402,12 +404,26 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def setup_logging(log_level: str) -> Path:
+    log_dir = Path(__file__).resolve().parent / "log"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / f"{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log"
+
+    logging.basicConfig(
+        level=getattr(logging, log_level),
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(log_file, encoding="utf-8"),
+        ],
+    )
+    return log_file
+
+
 def main() -> None:
     args = parse_args()
-    logging.basicConfig(
-        level=getattr(logging, args.log_level),
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
+    log_file = setup_logging(args.log_level)
+    logger.info(f"Logging to file: {log_file}")
 
     host = RobotHost(
         uart_port=args.uart_port,
@@ -427,6 +443,7 @@ def main() -> None:
 
     if host.restart_requested:
         logger.warning("Restarting TELBot Host process via os.execv...")
+        logging.shutdown()
         sys.stdout.flush()
         sys.stderr.flush()
         os.execv(sys.executable, [sys.executable, *sys.argv])
