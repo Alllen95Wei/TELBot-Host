@@ -387,13 +387,16 @@ class UARTComm:
         port: str = "/dev/ttyAMA0",
         baudrate: int = 115200,
         timeout: float = 0.1,
+        dry_run: bool = False,
     ) -> None:
         self.port = port
         self.baudrate = baudrate
         self.timeout = timeout
+        self.dry_run = dry_run
 
         self._ser: Optional[serial.Serial] = None
         self._running = threading.Event()
+        self._estop_event = threading.Event()
 
         # Threads
         self._tx_thread: Optional[threading.Thread] = None
@@ -406,6 +409,11 @@ class UARTComm:
         self._tx_queue: queue.PriorityQueue[Tuple[int, int, Optional[Packet]]] = queue.PriorityQueue()
         self._queue_counter = itertools.count()
         self._seq_counter = 0
+
+        # Drive timeout tracking for host watchdog
+        self._drive_lock = threading.Lock()
+        self._is_driving = False
+        self._last_drive_time = 0.0
 
         # Parser & incoming data handling
         self._parser = PacketParser()
@@ -431,6 +439,15 @@ class UARTComm:
         """Starts serial port connection and spawns TX and RX worker threads."""
         if self._running.is_set():
             logger.warning("UARTComm is already running.")
+            return
+
+        if self.dry_run:
+            logger.info("Starting UARTComm in DRY-RUN mode (hardware serial disabled).")
+            self._running.set()
+            self._tx_thread = threading.Thread(
+                target=self._tx_loop, name="UART-TX-DryRun", daemon=True
+            )
+            self._tx_thread.start()
             return
 
         logger.info(f"Connecting to UART on {self.port} at {self.baudrate} baud...")
@@ -492,48 +509,104 @@ class UARTComm:
     def is_running(self) -> bool:
         return self._running.is_set()
 
+    @property
+    def estop_active(self) -> bool:
+        """Returns True if the emergency stop interlock is currently latched."""
+        return self._estop_event.is_set()
+
+    @property
+    def is_driving(self) -> bool:
+        """Returns True if the last commanded chassis velocity was non-zero."""
+        with self._drive_lock:
+            return self._is_driving
+
+    @property
+    def last_drive_time(self) -> float:
+        """Returns timestamp of the most recent chassis drive command."""
+        with self._drive_lock:
+            return self._last_drive_time
+
+    def trigger_estop(self) -> None:
+        """
+        Latches the E-Stop interlock, purges all queued RUN commands across all
+        subsystems, and dispatches an immediate Priority-0 STOP_ALL packet.
+        """
+        self._estop_event.set()
+        with self._drive_lock:
+            self._is_driving = False
+        self.clear_run_queue(PartType.ALL)
+        self.send_stop(part=PartType.ALL, clear_pending_drive=False)
+
+    def clear_estop(self) -> None:
+        """Releases the E-Stop interlock so RUN commands are accepted again."""
+        self._estop_event.clear()
+
+    def flush_tx(self, timeout: float = 0.2) -> bool:
+        """Waits up to `timeout` seconds for queued TX packets to finish writing."""
+        deadline = time.monotonic() + timeout
+        while (
+            not self._tx_queue.empty() or self._tx_queue.unfinished_tasks > 0
+        ) and time.monotonic() < deadline:
+            time.sleep(0.005)
+        return self._tx_queue.empty() and self._tx_queue.unfinished_tasks == 0
+
     # --------------------------------------------------------------------------
     # Queue Interface for API Server & External Callers
     # --------------------------------------------------------------------------
-    def send_packet(self, packet: Packet, priority: int = 2) -> None:
+    def send_packet(self, packet: Packet, priority: int = 2) -> bool:
         """
         Thread-safe method to append a packet into the TX queue.
         Can be called directly from FastAPI endpoints, WebSockets, or background loops.
+        Returns False if rejected due to active E-Stop interlock.
         """
+        if self._estop_event.is_set() and packet.cmd == CmdType.RUN:
+            logger.debug(f"Blocked {packet.part.name} RUN packet while E-Stop is active.")
+            return False
+
         # Assign auto-incrementing sequence number if not set
         if packet.seq == 0:
             self._seq_counter = (self._seq_counter + 1) & 0xFF
             packet.seq = self._seq_counter
 
         self._tx_queue.put_nowait((priority, next(self._queue_counter), packet))
+        return True
 
     def send_stop(self, part: PartType = PartType.ALL, clear_pending_drive: bool = True) -> None:
         """
         Sends an emergency or normal STOP command with top priority (0).
         Optionally clears any pending drive commands to prevent buffered movement.
         """
+        if part in (PartType.ALL, PartType.CHASSIS):
+            with self._drive_lock:
+                self._is_driving = False
+
         if clear_pending_drive:
             self.clear_drive_queue()
 
         pkt = Packet.create_stop(part=part)
         self.send_packet(pkt, priority=0)
 
-    def send_drive(self, vx: int, vy: int, omega: int, priority: int = 2) -> None:
+    def send_drive(self, vx: int, vy: int, omega: int, priority: int = 2) -> bool:
         """Enqueues a chassis drive command."""
         pkt = Packet.create_chassis_drive(vx=vx, vy=vy, omega=omega)
-        self.send_packet(pkt, priority=priority)
+        enqueued = self.send_packet(pkt, priority=priority)
+        if enqueued:
+            with self._drive_lock:
+                self._is_driving = (vx != 0 or vy != 0 or omega != 0)
+                self._last_drive_time = time.monotonic()
+        return enqueued
 
     def send_shooter_command(
         self, flywheel: int, angle: int = 0, priority: int = 2
-    ) -> None:
+    ) -> bool:
         """Enqueues a shooter command (flywheel, angle)."""
         pkt = Packet.create_shooter_command(flywheel=flywheel, angle=angle)
-        self.send_packet(pkt, priority=priority)
+        return self.send_packet(pkt, priority=priority)
 
-    def send_shooter_flywheel(self, speed: int, priority: int = 2) -> None:
+    def send_shooter_flywheel(self, speed: int, priority: int = 2) -> bool:
         """Enqueues a shooter flywheel command."""
         pkt = Packet.create_shooter_flywheel(speed=speed)
-        self.send_packet(pkt, priority=priority)
+        return self.send_packet(pkt, priority=priority)
 
     def send_conveyor_command(
         self,
@@ -541,38 +614,38 @@ class UARTComm:
         spinner_run: bool = False,
         spinner_reversed: bool = False,
         priority: int = 2,
-    ) -> None:
+    ) -> bool:
         """Enqueues a full conveyor command (trigger speed, spinner run, spinner reversed)."""
         pkt = Packet.create_conveyor_command(
             trigger=trigger, spinner_run=spinner_run, spinner_reversed=spinner_reversed
         )
-        self.send_packet(pkt, priority=priority)
+        return self.send_packet(pkt, priority=priority)
 
-    def send_conveyor_trigger(self, speed: int, priority: int = 2) -> None:
+    def send_conveyor_trigger(self, speed: int, priority: int = 2) -> bool:
         """Enqueues a conveyor trigger motor command."""
         pkt = Packet.create_conveyor_trigger(speed=speed)
-        self.send_packet(pkt, priority=priority)
+        return self.send_packet(pkt, priority=priority)
 
     def send_conveyor_spinner(
         self, run: bool = True, reversed: bool = False, priority: int = 2
-    ) -> None:
+    ) -> bool:
         """Enqueues a conveyor spinner command (run: bool, reversed: bool)."""
         pkt = Packet.create_conveyor_spinner(run=run, reversed=reversed)
-        self.send_packet(pkt, priority=priority)
+        return self.send_packet(pkt, priority=priority)
 
-    def send_conveyor(self, speed: int, priority: int = 2) -> None:
+    def send_conveyor(self, speed: int, priority: int = 2) -> bool:
         """Alias for send_conveyor_trigger."""
-        self.send_conveyor_trigger(speed=speed, priority=priority)
+        return self.send_conveyor_trigger(speed=speed, priority=priority)
 
     def send_ping(self, priority: int = 1) -> None:
         """Enqueues a keep-alive ping."""
         pkt = Packet.create_ping()
         self.send_packet(pkt, priority=priority)
 
-    def clear_drive_queue(self) -> int:
+    def clear_run_queue(self, part: PartType = PartType.ALL) -> int:
         """
-        Drains all pending drive (RUN) commands from TX queue to prevent stale actuation.
-        Returns the number of discarded drive commands.
+        Drains pending RUN commands for `part` (or all subsystems if PartType.ALL)
+        from the TX queue to prevent stale actuation.
         """
         removed = 0
         preserved: list[Tuple[int, int, Optional[Packet]]] = []
@@ -580,11 +653,15 @@ class UARTComm:
             while not self._tx_queue.empty():
                 item = self._tx_queue.get_nowait()
                 _, _, pkt = item
-                if pkt is not None and pkt.cmd == CmdType.RUN and pkt.part == PartType.CHASSIS:
+                if (
+                    pkt is not None
+                    and pkt.cmd == CmdType.RUN
+                    and (part == PartType.ALL or pkt.part == part)
+                ):
                     removed += 1
-                    self._tx_queue.task_done()
                 else:
                     preserved.append(item)
+                self._tx_queue.task_done()
         except queue.Empty:
             pass
 
@@ -592,6 +669,13 @@ class UARTComm:
             self._tx_queue.put_nowait(item)
 
         return removed
+
+    def clear_drive_queue(self) -> int:
+        """
+        Drains all pending chassis drive (RUN) commands from TX queue to prevent stale actuation.
+        Returns the number of discarded drive commands.
+        """
+        return self.clear_run_queue(PartType.CHASSIS)
 
     # --------------------------------------------------------------------------
     # Callbacks & Telemetry Subscription
@@ -621,6 +705,8 @@ class UARTComm:
             stats = dict(self._stats)
             stats["queue_depth"] = self._tx_queue.qsize()
             stats["is_running"] = self._running.is_set()
+            stats["estop_active"] = self._estop_event.is_set()
+            stats["dry_run"] = self.dry_run
             return stats
 
     # --------------------------------------------------------------------------
@@ -641,6 +727,18 @@ class UARTComm:
                 # Sentinel wake-up on shutdown
                 self._tx_queue.task_done()
                 break
+
+            if self._estop_event.is_set() and packet.cmd == CmdType.RUN:
+                self._tx_queue.task_done()
+                continue
+
+            if self.dry_run:
+                logger.debug(f"[DRY-RUN TX] {packet}")
+                with self._stats_lock:
+                    self._stats["tx_packets"] += 1
+                    self._stats["last_tx_time"] = time.time()
+                self._tx_queue.task_done()
+                continue
 
             if self._ser and self._ser.is_open:
                 try:
@@ -776,4 +874,29 @@ if __name__ == "__main__":
     assert CmdType.STOP in cmds
     assert CmdType.RUN in cmds  # Shooter is RUN but not CHASSIS, so preserved
     print("Priority and queue-clearing assertions verified successfully!")
+
+    # 6. Test E-Stop Interlock & Dry-Run Mode
+    with UARTComm(dry_run=True) as dry_comm:
+        assert dry_comm.is_running
+        assert dry_comm.send_drive(vx=300, vy=0, omega=0) is True
+        assert dry_comm.is_driving is True
+
+        dry_comm.trigger_estop()
+        assert dry_comm.estop_active is True
+        assert dry_comm.is_driving is False
+        # RUN commands must be rejected while E-Stop is active
+        assert dry_comm.send_drive(vx=400, vy=0, omega=0) is False
+        assert dry_comm.send_shooter_command(flywheel=700) is False
+        # PING and STOP still pass through
+        dry_comm.send_ping()
+        dry_comm.flush_tx(timeout=0.2)
+        stats = dry_comm.get_stats()
+        assert stats["estop_active"] is True
+        assert stats["dry_run"] is True
+        assert stats["tx_packets"] >= 2
+
+        dry_comm.clear_estop()
+        assert dry_comm.estop_active is False
+        assert dry_comm.send_drive(vx=100, vy=0, omega=0) is True
+    print("E-Stop interlock and Dry-Run checks passed!")
     print("All subsystem packet verification checks passed!")
