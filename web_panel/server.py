@@ -1,25 +1,22 @@
-import asyncio
 import logging
+import os
+import sys
 from contextlib import asynccontextmanager
-from typing import Optional
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-import sys
-import os
-
 # Add root directory to path so comms and config can be imported
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from comms import CmdType, Packet, PartType, UARTComm
+from comms import PartType, UARTComm
 from config import UART as UARTConfig
 
 logger = logging.getLogger("TELBot.Server")
 
 # ==============================================================================
-# Shared Hardware Communicator Instance
+# Shared Hardware Communicator Instance (Injectable from main.py)
 # ==============================================================================
 uart = UARTComm(
     port=UARTConfig.PORT,
@@ -28,17 +25,41 @@ uart = UARTComm(
 )
 
 
+def set_uart_comm(comm: UARTComm) -> None:
+    """Injects an externally managed UARTComm instance (used by main.py)."""
+    global uart
+    uart = comm
+    app.state.uart = comm
+
+
+def get_uart_comm() -> UARTComm:
+    """Returns the active UARTComm instance."""
+    return getattr(app.state, "uart", uart)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Manages the startup and shutdown lifecycle of the UART worker threads."""
-    logger.info("Initializing UART dual-threaded communication workers...")
-    try:
-        uart.start()
-    except Exception as e:
-        logger.error(f"Failed to start UART worker threads: {e}")
+    """
+    Manages the startup and shutdown lifecycle of the UART worker threads
+    when running standalone (skips if already started by main.py).
+    """
+    comm = get_uart_comm()
+    app.state.uart = comm
+    managed_internally = False
+
+    if not comm.is_running:
+        logger.info("Initializing UART dual-threaded communication workers (standalone mode)...")
+        try:
+            comm.start()
+            managed_internally = True
+        except Exception as e:
+            logger.error(f"Failed to start UART worker threads: {e}")
+
     yield
-    logger.info("Shutting down UART communication workers...")
-    uart.stop()
+
+    if managed_internally:
+        logger.info("Shutting down UART communication workers (standalone mode)...")
+        comm.stop()
 
 
 # ==============================================================================
@@ -49,6 +70,7 @@ app = FastAPI(
     description="Real-time control and telemetry server for TELBot robot",
     lifespan=lifespan,
 )
+app.state.uart = uart
 
 app.add_middleware(
     CORSMiddleware,
@@ -57,6 +79,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _require_ready_uart() -> UARTComm:
+    """Validates that UARTComm is running and E-Stop is not active."""
+    comm = get_uart_comm()
+    if not comm.is_running:
+        raise HTTPException(status_code=503, detail="UART communicator is not running")
+    if comm.estop_active:
+        raise HTTPException(
+            status_code=423,
+            detail="Emergency Stop (E-Stop) is active; motion commands are locked",
+        )
+    return comm
 
 
 # ==============================================================================
@@ -105,9 +140,10 @@ class StopRequest(BaseModel):
 # ==============================================================================
 @app.get("/api/status")
 def get_status():
-    """Retrieve communication statistics, queue depth, and latest telemetry."""
-    stats = uart.get_stats()
-    telemetry = uart.latest_telemetry
+    """Retrieve communication statistics, E-Stop state, queue depth, and latest telemetry."""
+    comm = get_uart_comm()
+    stats = comm.get_stats()
+    telemetry = comm.latest_telemetry
     parsed_telem = None
 
     if telemetry is not None:
@@ -117,7 +153,8 @@ def get_status():
             parsed_telem = {"raw_hex": telemetry.payload.hex()}
 
     return {
-        "status": "ok",
+        "status": "estop" if comm.estop_active else "ok",
+        "estop_active": comm.estop_active,
         "stats": stats,
         "latest_telemetry": parsed_telem,
     }
@@ -129,10 +166,8 @@ def drive_robot(req: DriveRequest):
     Appends a new chassis drive command into the TX PriorityQueue (Priority 2).
     Thread-safe and returns immediately.
     """
-    if not uart.is_running:
-        raise HTTPException(status_code=503, detail="UART communicator is not running")
-
-    uart.send_drive(vx=req.vx, vy=req.vy, omega=req.omega)
+    comm = _require_ready_uart()
+    comm.send_drive(vx=req.vx, vy=req.vy, omega=req.omega)
     return {"status": "enqueued", "subsystem": "chassis", "vx": req.vx, "vy": req.vy, "omega": req.omega}
 
 
@@ -141,10 +176,8 @@ def control_shooter(req: ShooterRequest):
     """
     Controls shooter flywheels and pitch angle adjustment.
     """
-    if not uart.is_running:
-        raise HTTPException(status_code=503, detail="UART communicator is not running")
-
-    uart.send_shooter_command(flywheel=req.flywheel, angle=req.angle)
+    comm = _require_ready_uart()
+    comm.send_shooter_command(flywheel=req.flywheel, angle=req.angle)
     return {
         "status": "enqueued",
         "subsystem": "shooter",
@@ -158,10 +191,8 @@ def control_shooter_flywheel(req: ShooterFlywheelRequest):
     """
     Sets only the shooter flywheel speed.
     """
-    if not uart.is_running:
-        raise HTTPException(status_code=503, detail="UART communicator is not running")
-
-    uart.send_shooter_flywheel(speed=req.speed)
+    comm = _require_ready_uart()
+    comm.send_shooter_flywheel(speed=req.speed)
     return {"status": "enqueued", "subsystem": "shooter", "flywheel": req.speed}
 
 
@@ -170,10 +201,8 @@ def control_conveyor(req: ConveyorRequest):
     """
     Controls all conveyor components: trigger motor speed and spinner state (run, reversed).
     """
-    if not uart.is_running:
-        raise HTTPException(status_code=503, detail="UART communicator is not running")
-
-    uart.send_conveyor_command(
+    comm = _require_ready_uart()
+    comm.send_conveyor_command(
         trigger=req.trigger,
         spinner_run=req.spinner_run,
         spinner_reversed=req.spinner_reversed,
@@ -192,10 +221,8 @@ def control_conveyor_trigger(req: ConveyorTriggerRequest):
     """
     Sets only the conveyor trigger motor speed.
     """
-    if not uart.is_running:
-        raise HTTPException(status_code=503, detail="UART communicator is not running")
-
-    uart.send_conveyor_trigger(speed=req.speed)
+    comm = _require_ready_uart()
+    comm.send_conveyor_trigger(speed=req.speed)
     return {"status": "enqueued", "subsystem": "conveyor", "trigger": req.speed}
 
 
@@ -204,10 +231,8 @@ def control_conveyor_spinner(req: ConveyorSpinnerRequest):
     """
     Sets only the conveyor spinner state (run: bool, reversed: bool).
     """
-    if not uart.is_running:
-        raise HTTPException(status_code=503, detail="UART communicator is not running")
-
-    uart.send_conveyor_spinner(run=req.run, reversed=req.reversed)
+    comm = _require_ready_uart()
+    comm.send_conveyor_spinner(run=req.run, reversed=req.reversed)
     return {
         "status": "enqueued",
         "subsystem": "conveyor",
@@ -222,15 +247,17 @@ def stop_robot(req: StopRequest):
     Appends an emergency or normal STOP command into the TX PriorityQueue (Priority 0).
     Purges any stale drive commands to halt motors instantly.
     """
-    uart.send_stop(part=PartType(req.part), clear_pending_drive=req.clear_pending_drive)
-    return {"status": "stopped", "part": req.part}
+    comm = get_uart_comm()
+    comm.send_stop(part=PartType(req.part), clear_pending_drive=req.clear_pending_drive)
+    return {"status": "stopped", "part": req.part, "estop_active": comm.estop_active}
 
 
 @app.post("/api/ping")
 def ping_slave():
     """Sends a keep-alive ping to the slave Pico."""
-    uart.send_ping()
-    return {"status": "ping_sent"}
+    comm = get_uart_comm()
+    comm.send_ping()
+    return {"status": "ping_sent", "estop_active": comm.estop_active}
 
 
 # ==============================================================================
@@ -248,27 +275,30 @@ async def websocket_control(websocket: WebSocket):
     """
     await websocket.accept()
     logger.info("WebHID/Gamepad WebSocket client connected.")
+    comm = get_uart_comm()
+
     try:
         while True:
             data = await websocket.receive_json()
             msg_type = data.get("type")
+            accepted = True
 
             if msg_type == "drive":
                 vx = int(data.get("vx", 0))
                 vy = int(data.get("vy", 0))
                 omega = int(data.get("omega", 0))
-                uart.send_drive(vx=vx, vy=vy, omega=omega)
+                accepted = comm.send_drive(vx=vx, vy=vy, omega=omega)
 
             elif msg_type == "shooter":
                 flywheel = int(data.get("flywheel", 0))
                 angle = int(data.get("angle", 0))
-                uart.send_shooter_command(flywheel=flywheel, angle=angle)
+                accepted = comm.send_shooter_command(flywheel=flywheel, angle=angle)
 
             elif msg_type == "conveyor":
                 trigger = int(data.get("trigger", 0))
                 spinner_run = bool(data.get("spinner_run", False))
                 spinner_reversed = bool(data.get("spinner_reversed", False))
-                uart.send_conveyor_command(
+                accepted = comm.send_conveyor_command(
                     trigger=trigger,
                     spinner_run=spinner_run,
                     spinner_reversed=spinner_reversed,
@@ -276,11 +306,11 @@ async def websocket_control(websocket: WebSocket):
 
             elif msg_type == "stop":
                 part_val = int(data.get("part", PartType.ALL.value))
-                uart.send_stop(part=PartType(part_val))
+                comm.send_stop(part=PartType(part_val))
 
             # Read latest stats & telemetry snapshot to send back to client
-            stats = uart.get_stats()
-            telem = uart.latest_telemetry
+            stats = comm.get_stats()
+            telem = comm.latest_telemetry
             parsed_telem = None
             if telem:
                 try:
@@ -289,6 +319,8 @@ async def websocket_control(websocket: WebSocket):
                     pass
 
             await websocket.send_json({
+                "estop_active": comm.estop_active,
+                "command_accepted": accepted,
                 "queue_depth": stats["queue_depth"],
                 "tx_packets": stats["tx_packets"],
                 "rx_packets": stats["rx_packets"],
@@ -297,7 +329,7 @@ async def websocket_control(websocket: WebSocket):
 
     except WebSocketDisconnect:
         logger.info("WebSocket client disconnected. Issuing safety stop...")
-        uart.send_stop()
+        comm.send_stop()
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
-        uart.send_stop()
+        comm.send_stop()
