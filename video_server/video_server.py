@@ -12,8 +12,10 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-# Add root directory to sys.path so config can be imported directly
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+# Add project root directory to sys.path so config.py can be imported from any working directory
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 from config import Camera as CameraConfig
 
 # Pre-tuned presets optimized for C920r 16:9 sensor & teleoperation bandwidth limits
