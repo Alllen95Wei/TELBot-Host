@@ -19,3 +19,14 @@ class EStop:
     PIN = 17  # BCM GPIO pin wired between E-Stop button and GND
     NORMALLY_CLOSED = True  # Closed to GND (LOW) = normal; Open (HIGH) = E-Stop triggered
     DEBOUNCE_MS = 20  # Hardware/kernel debounce interval in milliseconds
+
+
+class Camera:
+    DEVICE = "/dev/v4l/by-id/usb-046d_HD_Pro_Webcam_C920-video-index0"
+    FALLBACK_DEVICE = "/dev/video0"
+    HOST = "0.0.0.0"
+    PORT = 8001
+    DEFAULT_PRESET = "720p15"
+    BUFFERS = 2  # minimal buffer latency (2 frames)
+    TCP_NODELAY = True
+    ALLOW_ORIGIN = "*"
