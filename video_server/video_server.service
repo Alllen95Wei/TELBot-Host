@@ -1,0 +1,18 @@
+[Unit]
+Description=USB webcam video streamer
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/TELBot-Host
+ExecStart=/home/ubuntu/TELBot-Host/video_server/video_server.py
+
+Restart=always
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+
