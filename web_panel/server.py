@@ -9,10 +9,13 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 # Add root directory to path so comms and config can be imported
-ROOT_DIR = Path(__file__).resolve().parent.parent
+PANEL_DIR = Path(__file__).resolve().parent
+STATIC_DIR = PANEL_DIR / "static"
+ROOT_DIR = PANEL_DIR.parent
 sys.path.append(str(ROOT_DIR))
 
 from comms import PartType, UARTComm
@@ -86,6 +89,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+if STATIC_DIR.is_dir():
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+@app.get("/", include_in_schema=False)
+def serve_web_panel():
+    """Serves the offline Material You (BeerCSS) operator panel."""
+    index_file = PANEL_DIR / "index.html"
+    if not index_file.is_file():
+        raise HTTPException(status_code=404, detail="web_panel/index.html not found")
+    return FileResponse(path=str(index_file), media_type="text/html")
 
 
 def _require_ready_uart() -> UARTComm:
