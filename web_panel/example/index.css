@@ -1,0 +1,14 @@
+table, th, td {
+    border: 1px solid black;
+}
+
+table {
+    width: 90%;
+    border-collapse: collapse;
+    table-layout: fixed;
+    font-family: Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+#connected-device-text {
+    font-family: Consolas, "Liberation Mono", "Courier New", monospace;
+}

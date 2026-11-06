@@ -1,0 +1,254 @@
+/* ==========================================================================
+   TELBot Operator Panel - Material You (BeerCSS) Custom Styles
+   ========================================================================== */
+
+:root {
+  --stick-pad-size: 132px;
+}
+
+body {
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+/* Top bar & E-Stop Alert Banner */
+.topbar-card {
+  margin-bottom: 12px;
+}
+
+.estop-banner {
+  background: var(--error) !important;
+  color: var(--on-error) !important;
+  border-radius: 12px;
+  padding: 10px 16px;
+  margin-bottom: 12px;
+  font-weight: 700;
+  animation: pulse-estop 1.2s infinite ease-in-out;
+}
+
+@keyframes pulse-estop {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.78; }
+}
+
+/* 16:9 Video Viewport */
+.video-container {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: #0b0d12;
+  border-radius: 14px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--outline-variant);
+}
+
+.video-container img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.video-offline-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: rgba(12, 14, 20, 0.88);
+  color: #e2e8f0;
+  text-align: center;
+  padding: 16px;
+}
+
+.video-crosshair {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.video-crosshair::before,
+.video-crosshair::after {
+  content: "";
+  position: absolute;
+  background: rgba(0, 255, 136, 0.65);
+}
+
+.video-crosshair::before {
+  width: 48px;
+  height: 2px;
+}
+
+.video-crosshair::after {
+  width: 2px;
+  height: 48px;
+}
+
+.video-crosshair-ring {
+  width: 28px;
+  height: 28px;
+  border: 1.5px solid rgba(0, 255, 136, 0.65);
+  border-radius: 50%;
+}
+
+/* 2D Analog Stick Pads */
+.stick-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 12px;
+  background: var(--surface-container);
+}
+
+.stick-pad {
+  position: relative;
+  width: var(--stick-pad-size);
+  height: var(--stick-pad-size);
+  border-radius: 50%;
+  background: var(--surface-container-highest);
+  border: 2px solid var(--outline-variant);
+  overflow: hidden;
+}
+
+.stick-axis-x,
+.stick-axis-y {
+  position: absolute;
+  background: var(--outline-variant);
+  opacity: 0.5;
+}
+
+.stick-axis-x {
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 1px;
+}
+
+.stick-axis-y {
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+}
+
+.stick-dot {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--primary);
+  box-shadow: 0 0 10px var(--primary);
+  transform: translate(-50%, -50%);
+  left: 50%;
+  top: 50%;
+  transition: left 35ms linear, top 35ms linear;
+}
+
+/* Controller Buttons Matrix */
+.btn-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+
+.controller-btn-pill {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 6px;
+  border-radius: 12px;
+  border: 1px solid var(--outline-variant);
+  background: var(--surface-container);
+  transition: all 80ms ease;
+  user-select: none;
+  text-align: center;
+}
+
+.controller-btn-pill.active {
+  background: var(--primary);
+  color: var(--on-primary);
+  border-color: var(--primary);
+  transform: scale(0.97);
+}
+
+.controller-btn-pill .btn-name {
+  font-weight: 700;
+  font-size: 0.95rem;
+}
+
+.controller-btn-pill .btn-action-label {
+  font-size: 0.7rem;
+  opacity: 0.8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+/* Raw Report Table (from PoC) */
+.raw-table-wrap {
+  overflow-x: auto;
+  margin-top: 8px;
+}
+
+table.report-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 0.78rem;
+}
+
+table.report-table th,
+table.report-table td {
+  border: 1px solid var(--outline-variant);
+  padding: 4px 3px;
+  text-align: center;
+}
+
+/* Command Telemetry Readout Boxes */
+.cmd-metric {
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--surface-container);
+  border: 1px solid var(--outline-variant);
+}
+
+.cmd-metric .label {
+  font-size: 0.75rem;
+  opacity: 0.75;
+}
+
+.cmd-metric .value {
+  font-size: 1.15rem;
+  font-weight: 700;
+}
+
+/* Compact field spacing inside mapping table */
+.mapping-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--surface-container-highest);
+}
+
+.mapping-row:last-child {
+  border-bottom: none;
+}
+

@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>WebHID Test</title>
+    <link rel="stylesheet" href="index.css" />
+    <script src="../dist/index.js"></script>
+</head>
+<body>
+    <h1>WebHID Test</h1>
+    <button id="connect-btn">Connect to HID Device</button>
+    <button id="forget-btn" disabled>Forget Current Device</button>
+    <p>Connected device: <span id="connected-device-text">N/A</span></p>
+    <table id="report-table">
+        <thead>
+        <tr id="report-table-idx">
+            <th>#</th>
+        </tr>
+        </thead>
+        <tbody>
+        <tr id="report-table-raw">
+            <td>RAW</td>
+        </tr>
+        <tr id="report-table-percnt">
+            <td>PERCNT</td>
+        </tr>
+        <tr id="report-table-btn">
+            <td>BTN</td>
+        </tr>
+        </tbody>
+    </table>
+</body>
+</html>

@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TELBot Operator Console</title>
+  <link rel="stylesheet" href="/static/beer.min.css" />
+  <link rel="stylesheet" href="/static/style.css" />
+  <script type="module" src="/static/beer.min.js"></script>
+  <script defer src="/static/app.js"></script>
+</head>
+<body class="dark">
+  <main class="responsive max">
+    <!-- ===================================================================
+         Top Status & Quick Actions Bar
+         =================================================================== -->
+    <article class="round border topbar-card">
+      <div class="row wrap space-between middle-align">
+        <div class="row middle-align">
+          <i class="extra primary-text">smart_toy</i>
+          <div>
+            <h5 class="no-margin">TELBot Operator Console</h5>
+            <small class="mono" id="host-origin-label">Host Control &amp; WebHID Teleop</small>
+          </div>
+        </div>
+
+        <!-- Status Chips -->
+        <div class="row wrap">
+          <span class="chip" id="ws-status-chip">
+            <i id="ws-status-icon">sync_problem</i>
+            <span id="ws-status-text">WS: Connecting</span>
+          </span>
+
+          <span class="chip" id="estop-status-chip">
+            <i id="estop-status-icon">verified_user</i>
+            <span id="estop-status-text">E-Stop: Normal</span>
+          </span>
+
+          <span class="chip">
+            <i>swap_vert</i>
+            <span class="mono" id="uart-stats-text">TX: 0 | RX: 0</span>
+          </span>
+
+          <span class="chip">
+            <i>battery_charging_full</i>
+            <span class="mono" id="battery-text">--.-- V</span>
+          </span>
+        </div>
+
+        <!-- Global Controls -->
+        <div class="row wrap">
+          <a class="button small border round" href="/ca.crt" download="telbot-ca.crt" title="Download TELBot Root CA Certificate">
+            <i>verified</i>
+            <span>Root CA</span>
+          </a>
+          <button class="button small circle border" id="theme-toggle-btn" title="Toggle Dark/Light Theme">
+            <i id="theme-toggle-icon">light_mode</i>
+          </button>
+          <button class="button small error round" id="emergency-stop-btn">
+            <i>report</i>
+            <span>STOP ALL</span>
+          </button>
+        </div>
+      </div>
+    </article>
+
+    <!-- Hardware E-Stop Alert Banner (Hidden when Normal) -->
+    <div id="estop-alert-banner" class="estop-banner row middle-align space-between" style="display: none;">
+      <div class="row middle-align">
+        <i>warning</i>
+        <span>HARDWARE EMERGENCY STOP IS ACTIVE — All motion commands are locked until the physical E-Stop button is released!</span>
+      </div>
+      <span class="mono">HTTP 423 LOCKED</span>
+    </div>
+
+    <!-- Insecure Context / WebHID Availability Warning (Hidden on HTTPS/localhost) -->
+    <article id="webhid-warning-card" class="round border error-container" style="display: none; margin-bottom: 12px;">
+      <div class="row middle-align">
+        <i>security</i>
+        <div>
+          <h6 class="no-margin">WebHID Requires HTTPS or Localhost</h6>
+          <p class="no-margin">
+            <code>navigator.hid</code> is unavailable on this origin. Please open
+            <a id="https-redirect-link" class="underline bold" href="#">the HTTPS URL</a>
+            or enable <code>chrome://flags/#unsafely-treat-insecure-origin-as-secure</code>.
+          </p>
+        </div>
+      </div>
+    </article>
+
+    <!-- ===================================================================
+         Main 2-Column Responsive Grid
+         =================================================================== -->
+    <div class="grid">
+      <!-- =================================================================
+           LEFT COLUMN: Real-Time Video & Outgoing Command Telemetry
+           ================================================================= -->
+      <div class="s12 m12 l7">
+        <!-- Section 1: Real-Time Video Feed -->
+        <article class="round border">
+          <div class="row wrap space-between middle-align">
+            <div class="row middle-align">
+              <i class="primary-text">videocam</i>
+              <h6 class="no-margin">Real-Time Camera Stream</h6>
+            </div>
+
+            <div class="row wrap">
+              <span class="chip small" id="cam-online-chip">
+                <i id="cam-online-icon">sensors_off</i>
+                <span id="cam-online-text">Offline</span>
+              </span>
+              <span class="chip small mono" id="cam-res-chip">----x----</span>
+              <span class="chip small mono" id="cam-fps-chip">-- fps</span>
+            </div>
+          </div>
+
+          <div class="small-space"></div>
+
+          <!-- 16:9 Stream Container -->
+          <div class="video-container">
+            <img id="video-stream-img" alt="TELBot Live Camera Feed" />
+
+            <!-- Aiming Crosshair Overlay -->
+            <div id="video-crosshair" class="video-crosshair">
+              <div class="video-crosshair-ring"></div>
+            </div>
+
+            <!-- Offline Placeholder -->
+            <div id="video-offline-overlay" class="video-offline-overlay">
+              <i class="extra">videocam_off</i>
+              <h6 class="no-margin">Camera Stream Unavailable</h6>
+              <p class="no-margin small-text">
+                Start the video server on the Pi with <code>./video_server.py</code>, then click Reload.
+              </p>
+            </div>
+          </div>
+
+          <div class="small-space"></div>
+
+          <!-- Video Controls Row -->
+          <div class="row wrap space-between middle-align">
+            <div class="row wrap middle-align">
+              <label class="switch icon">
+                <input type="checkbox" id="crosshair-toggle" checked />
+                <span><i>my_location</i></span>
+              </label>
+              <span>Crosshair</span>
+
+              <div class="field small border round no-margin" style="width: 230px;">
+                <select id="video-source-mode">
+                  <option value="proxy" selected>HTTPS Proxy (/api/video/stream)</option>
+                  <option value="direct">Direct uStreamer (:8001/stream)</option>
+                </select>
+                <i>arrow_drop_down</i>
+              </div>
+            </div>
+
+            <div class="row wrap">
+              <a class="button small border round" id="snapshot-btn" href="/api/video/snapshot" target="_blank">
+                <i>photo_camera</i>
+                <span>Snapshot</span>
+              </a>
+              <button class="button small primary round" id="video-reload-btn">
+                <i>refresh</i>
+                <span>Reload Stream</span>
+              </button>
+            </div>
+          </div>
+        </article>
+
+        <!-- Section 2: Outgoing Robot Command Telemetry -->
+        <article class="round border">
+          <div class="row wrap space-between middle-align">
+            <div class="row middle-align">
+              <i class="primary-text">settings_input_antenna</i>
+              <h6 class="no-margin">Live Robot Control Output (/ws/control)</h6>
+            </div>
+
+            <div class="row middle-align">
+              <label class="switch">
+                <input type="checkbox" id="control-armed-toggle" checked />
+                <span></span>
+              </label>
+              <span id="control-armed-label" class="bold">Control Armed (25 Hz)</span>
+            </div>
+          </div>
+
+          <div class="small-space"></div>
+
+          <div class="grid">
+            <div class="s4">
+              <div class="cmd-metric">
+                <div class="label">Chassis VX (Fwd/Back)</div>
+                <div class="value mono" id="cmd-vx">0</div>
+              </div>
+            </div>
+            <div class="s4">
+              <div class="cmd-metric">
+                <div class="label">Chassis VY (Strafe)</div>
+                <div class="value mono" id="cmd-vy">0</div>
+              </div>
+            </div>
+            <div class="s4">
+              <div class="cmd-metric">
+                <div class="label">Chassis Omega (Turn)</div>
+                <div class="value mono" id="cmd-omega">0</div>
+              </div>
+            </div>
+            <div class="s4">
+              <div class="cmd-metric">
+                <div class="label">Shooter Flywheel</div>
+                <div class="value mono" id="cmd-flywheel">0</div>
+              </div>
+            </div>
+            <div class="s4">
+              <div class="cmd-metric">
+                <div class="label">Shooter Pitch Angle</div>
+                <div class="value mono" id="cmd-angle">0</div>
+              </div>
+            </div>
+            <div class="s4">
+              <div class="cmd-metric">
+                <div class="label">Conveyor (Trig / Spin)</div>
+                <div class="value mono" id="cmd-conveyor">0 | OFF</div>
+              </div>
+            </div>
+          </div>
+        </article>
+      </div>
+
+      <!-- =================================================================
+           RIGHT COLUMN: WebHID F310 Status & Configurable Mapping
+           ================================================================= -->
+      <div class="s12 m12 l5">
+        <!-- Section 3: WebHID Controller Status -->
+        <article class="round border">
+          <div class="row wrap space-between middle-align">
+            <div class="row middle-align">
+              <i class="primary-text">sports_esports</i>
+              <div>
+                <h6 class="no-margin">WebHID Controller Status</h6>
+                <small class="mono" id="connected-device-text">Disconnected (Logitech F310)</small>
+              </div>
+            </div>
+
+            <div class="row wrap">
+              <button class="button small primary round" id="connect-btn">
+                <i>usb</i>
+                <span>Connect HID</span>
+              </button>
+              <button class="button small border round" id="forget-btn" disabled>
+                <i>link_off</i>
+                <span>Forget</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="small-space"></div>
+
+          <!-- Dual Stick Visualizers -->
+          <div class="grid">
+            <div class="s6">
+              <div class="stick-card">
+                <span class="small-text bold">Left Stick (B1 / B3)</span>
+                <div class="stick-pad">
+                  <div class="stick-axis-x"></div>
+                  <div class="stick-axis-y"></div>
+                  <div class="stick-dot" id="left-stick-dot"></div>
+                </div>
+                <span class="mono small-text" id="left-stick-text">X: 0.0% | Y: 0.0%</span>
+              </div>
+            </div>
+
+            <div class="s6">
+              <div class="stick-card">
+                <span class="small-text bold">Right Stick (B5 / B7)</span>
+                <div class="stick-pad">
+                  <div class="stick-axis-x"></div>
+                  <div class="stick-axis-y"></div>
+                  <div class="stick-dot" id="right-stick-dot"></div>
+                </div>
+                <span class="mono small-text" id="right-stick-text">X: 0.0% | Y: 0.0%</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="small-space"></div>
+
+          <!-- Triggers (Byte 8 & Byte 9) -->
+          <div class="grid">
+            <div class="s6">
+              <div class="row space-between small-text">
+                <span>Axis B8 (Trigger)</span>
+                <span class="mono" id="axis-b8-text">0.0%</span>
+              </div>
+              <progress id="axis-b8-bar" value="0" max="100"></progress>
+            </div>
+            <div class="s6">
+              <div class="row space-between small-text">
+                <span>Axis B9 (Trigger)</span>
+                <span class="mono" id="axis-b9-text">0.0%</span>
+              </div>
+              <progress id="axis-b9-bar" value="50" max="100"></progress>
+            </div>
+          </div>
+
+          <div class="small-space"></div>
+
+          <!-- 8 F310 Buttons Matrix -->
+          <div class="small-text bold" style="margin-bottom: 6px;">Buttons (Byte 10)</div>
+          <div class="btn-grid" id="f310-btn-grid">
+            <!-- Populated dynamically with A, B, X, Y, LB, RB, Back, Start -->
+          </div>
+
+          <div class="small-space"></div>
+
+          <!-- Collapsible Raw HID Report Table (Exact PoC table) -->
+          <details>
+            <summary class="small-text bold" style="cursor: pointer;">
+              Raw HID Report Inspector (14 Bytes)
+            </summary>
+            <div class="raw-table-wrap">
+              <table id="report-table" class="report-table mono">
+                <thead>
+                  <tr id="report-table-idx">
+                    <th>#</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr id="report-table-raw">
+                    <td>RAW</td>
+                  </tr>
+                  <tr id="report-table-percnt">
+                    <td>%</td>
+                  </tr>
+                  <tr id="report-table-btn">
+                    <td>BTN</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </details>
+        </article>
+
+        <!-- Section 4: Configurable Axis & Button Mapping -->
+        <article class="round border">
+          <div class="row wrap space-between middle-align">
+            <div class="row middle-align">
+              <i class="primary-text">tune</i>
+              <h6 class="no-margin">Controller Mapping &amp; Tuning</h6>
+            </div>
+            <button class="button small border round" id="reset-mapping-btn" title="Restore Default Mapping">
+              <i>restart_alt</i>
+              <span>Reset Defaults</span>
+            </button>
+          </div>
+
+          <div class="small-space"></div>
+
+          <!-- Tuning Sliders -->
+          <div class="grid">
+            <div class="s6">
+              <label class="small-text">Stick Deadzone: <span class="mono bold" id="deadzone-val-label">8%</span></label>
+              <input type="range" id="deadzone-slider" min="0" max="25" step="1" value="8" style="width: 100%;" />
+            </div>
+            <div class="s6">
+              <label class="small-text">Drive Speed Scale: <span class="mono bold" id="speed-scale-val-label">100%</span></label>
+              <input type="range" id="speed-scale-slider" min="10" max="100" step="5" value="100" style="width: 100%;" />
+            </div>
+            <div class="s6">
+              <label class="small-text">Shooter Speed: <span class="mono bold" id="shooter-speed-val-label">800</span></label>
+              <input type="range" id="shooter-speed-slider" min="100" max="1000" step="50" value="800" style="width: 100%;" />
+            </div>
+            <div class="s6">
+              <label class="small-text">Conveyor Speed: <span class="mono bold" id="conveyor-speed-val-label">700</span></label>
+              <input type="range" id="conveyor-speed-slider" min="-1000" max="1000" step="50" value="700" style="width: 100%;" />
+            </div>
+          </div>
+
+          <div class="small-space"></div>
+
+          <!-- Axis Assignment -->
+          <details open>
+            <summary class="small-text bold" style="cursor: pointer; margin-bottom: 6px;">
+              Analog Axis Mapping
+            </summary>
+            <div id="axis-mapping-container">
+              <!-- Populated by app.js -->
+            </div>
+          </details>
+
+          <div class="small-space"></div>
+
+          <!-- Button Assignment -->
+          <details open>
+            <summary class="small-text bold" style="cursor: pointer; margin-bottom: 6px;">
+              Button Action Mapping (A, B, X, Y, LB, RB, Back, Start)
+            </summary>
+            <div id="button-mapping-container">
+              <!-- Populated by app.js -->
+            </div>
+          </details>
+        </article>
+      </div>
+    </div>
+  </main>
+</body>
+</html>
+
