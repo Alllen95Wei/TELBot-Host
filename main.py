@@ -177,13 +177,23 @@ class RobotHost:
         estop_pin: int = EStopConfig.PIN,
         dry_run: bool = False,
         disable_estop: bool = False,
+        enable_ssl: bool = True,
+        ssl_certfile: str = ServerConfig.SSL_CERTFILE,
+        ssl_keyfile: str = ServerConfig.SSL_KEYFILE,
         log_level: str = "INFO",
     ) -> None:
         self.host = host
         self.port = port
         self.dry_run = dry_run
         self.disable_estop = disable_estop
+        self.enable_ssl = enable_ssl
         self.log_level = log_level.lower()
+
+        root_dir = Path(__file__).resolve().parent
+        cert_path = Path(ssl_certfile)
+        key_path = Path(ssl_keyfile)
+        self.ssl_certfile = str(cert_path if cert_path.is_absolute() else (root_dir / cert_path))
+        self.ssl_keyfile = str(key_path if key_path.is_absolute() else (root_dir / key_path))
 
         self.ping_interval = SafetyConfig.PING_INTERVAL
         self.drive_timeout = SafetyConfig.DRIVE_TIMEOUT
@@ -305,12 +315,25 @@ class RobotHost:
         safety_task: Optional[asyncio.Task] = None
 
         # Configure Uvicorn server instance upfront so E-Stop callbacks can signal it safely
+        use_ssl = (
+            self.enable_ssl
+            and os.path.isfile(self.ssl_certfile)
+            and os.path.isfile(self.ssl_keyfile)
+        )
+        if self.enable_ssl and not use_ssl:
+            logger.warning(
+                f"SSL certificates not found at '{self.ssl_certfile}' / '{self.ssl_keyfile}'. "
+                "Falling back to plain HTTP (run ./scripts/generate_certs.sh to enable HTTPS for WebHID)."
+            )
+
         uv_config = uvicorn.Config(
             app=app,
             host=self.host,
             port=self.port,
             log_level=self.log_level,
             log_config=None,
+            ssl_certfile=self.ssl_certfile if use_ssl else None,
+            ssl_keyfile=self.ssl_keyfile if use_ssl else None,
         )
         self._uvicorn_server = uvicorn.Server(uv_config)
 
@@ -327,8 +350,9 @@ class RobotHost:
                 self._safety_and_heartbeat_loop(), name="Host-Safety-Loop"
             )
 
+            scheme = "https" if use_ssl else "http"
             logger.info(
-                f"TELBot Host running on http://{self.host}:{self.port} "
+                f"TELBot Host running on {scheme}://{self.host}:{self.port} "
                 f"(UART={self.uart.port}, dry_run={self.dry_run})"
             )
 
@@ -396,6 +420,21 @@ def parse_args() -> argparse.Namespace:
         help="Run server with simulated UART and GPIO for software/UI testing",
     )
     parser.add_argument(
+        "--no-ssl",
+        action="store_true",
+        help="Disable HTTPS and serve over plain HTTP",
+    )
+    parser.add_argument(
+        "--ssl-certfile",
+        default=ServerConfig.SSL_CERTFILE,
+        help=f"Path to TLS certificate file (default: {ServerConfig.SSL_CERTFILE})",
+    )
+    parser.add_argument(
+        "--ssl-keyfile",
+        default=ServerConfig.SSL_KEYFILE,
+        help=f"Path to TLS private key file (default: {ServerConfig.SSL_KEYFILE})",
+    )
+    parser.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
@@ -433,6 +472,9 @@ def main() -> None:
         estop_pin=args.estop_pin,
         dry_run=args.dry_run,
         disable_estop=args.no_estop,
+        enable_ssl=not args.no_ssl,
+        ssl_certfile=args.ssl_certfile,
+        ssl_keyfile=args.ssl_keyfile,
         log_level=args.log_level,
     )
 

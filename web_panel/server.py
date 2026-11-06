@@ -1,16 +1,23 @@
+import asyncio
+import json
 import logging
 import os
 import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 # Add root directory to path so comms and config can be imported
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT_DIR = Path(__file__).resolve().parent.parent
+sys.path.append(str(ROOT_DIR))
 
 from comms import PartType, UARTComm
+from config import Camera as CameraConfig
+from config import Server as ServerConfig
 from config import UART as UARTConfig
 
 logger = logging.getLogger("TELBot.Server")
@@ -258,6 +265,166 @@ def ping_slave():
     comm = get_uart_comm()
     comm.send_ping()
     return {"status": "ping_sent", "estop_active": comm.estop_active}
+
+
+# ==============================================================================
+# HTTPS Root CA Download & uStreamer Video Pass-Through (Option A)
+# ==============================================================================
+@app.get("/ca.crt")
+def download_ca_certificate():
+    """Downloads the TELBot Local Root CA certificate for zero-warning HTTPS in browsers."""
+    ca_path = ROOT_DIR / ServerConfig.CA_CERTFILE
+    if not ca_path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail="Root CA certificate not found. Run ./scripts/generate_certs.sh first.",
+        )
+    return FileResponse(
+        path=str(ca_path),
+        media_type="application/x-x509-ca-cert",
+        filename="telbot-ca.crt",
+    )
+
+
+async def _open_ustreamer_http(path: str, port: int) -> tuple[int, dict[str, str], asyncio.StreamReader, asyncio.StreamWriter]:
+    """Opens a local HTTP/1.0 connection to uStreamer and parses the response headers."""
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection("127.0.0.1", port), timeout=2.0
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Video server (uStreamer) is not reachable on 127.0.0.1:{port} ({e})",
+        )
+
+    try:
+        req_bytes = (
+            f"GET {path} HTTP/1.0\r\n"
+            f"Host: 127.0.0.1:{port}\r\n"
+            "Connection: close\r\n\r\n"
+        ).encode("ascii")
+        writer.write(req_bytes)
+        await writer.drain()
+
+        status_line = await asyncio.wait_for(reader.readline(), timeout=2.0)
+        if not status_line:
+            raise RuntimeError("Empty response from uStreamer")
+        parts = status_line.decode("latin-1", errors="replace").strip().split(" ", 2)
+        status_code = int(parts[1]) if len(parts) >= 2 and parts[1].isdigit() else 502
+
+        headers: dict[str, str] = {}
+        while True:
+            line = await asyncio.wait_for(reader.readline(), timeout=2.0)
+            if line in (b"\r\n", b"\n", b""):
+                break
+            decoded = line.decode("latin-1", errors="replace").strip()
+            if ":" in decoded:
+                k, v = decoded.split(":", 1)
+                headers[k.strip().lower()] = v.strip()
+
+        return status_code, headers, reader, writer
+    except Exception:
+        writer.close()
+        raise
+
+
+@app.get("/api/video/stream")
+async def proxy_video_stream(
+    port: int = Query(default=CameraConfig.PORT, ge=1, le=65535)
+):
+    """
+    Streams the live MJPEG feed from the local uStreamer process over the same
+    HTTPS origin so browsers never encounter Mixed Content blocks.
+    """
+    status_code, headers, reader, writer = await _open_ustreamer_http("/stream", port)
+    if status_code != 200:
+        writer.close()
+        raise HTTPException(
+            status_code=status_code,
+            detail=f"uStreamer /stream returned HTTP {status_code}",
+        )
+
+    content_type = headers.get(
+        "content-type", "multipart/x-mixed-replace;boundary=boundarydonotcross"
+    )
+
+    async def stream_generator():
+        try:
+            while True:
+                chunk = await reader.read(16384)
+                if not chunk:
+                    break
+                yield chunk
+        except asyncio.CancelledError:
+            pass
+        finally:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+    return StreamingResponse(
+        stream_generator(),
+        media_type=content_type,
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, pre-check=0, post-check=0, max-age=0",
+            "Pragma": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.get("/api/video/snapshot")
+async def proxy_video_snapshot(
+    port: int = Query(default=CameraConfig.PORT, ge=1, le=65535)
+):
+    """Proxies a single JPEG snapshot from the local uStreamer process."""
+    status_code, headers, reader, writer = await _open_ustreamer_http("/snapshot", port)
+    try:
+        body = await asyncio.wait_for(reader.read(), timeout=3.0)
+    finally:
+        writer.close()
+
+    if status_code != 200:
+        raise HTTPException(
+            status_code=status_code,
+            detail=f"uStreamer /snapshot returned HTTP {status_code}",
+        )
+    return Response(
+        content=body,
+        media_type=headers.get("content-type", "image/jpeg"),
+        headers={"Cache-Control": "no-store, no-cache, max-age=0"},
+    )
+
+
+@app.get("/api/video/state")
+async def proxy_video_state(
+    port: int = Query(default=CameraConfig.PORT, ge=1, le=65535)
+):
+    """Proxies the live JSON state from the local uStreamer process."""
+    try:
+        status_code, _, reader, writer = await _open_ustreamer_http("/state", port)
+        try:
+            body = await asyncio.wait_for(reader.read(), timeout=2.0)
+        finally:
+            writer.close()
+        return JSONResponse(status_code=status_code, content=json.loads(body.decode("utf-8")))
+    except HTTPException:
+        return JSONResponse(
+            status_code=200,
+            content={
+                "ok": False,
+                "online": False,
+                "error": f"uStreamer is not running on 127.0.0.1:{port}",
+            },
+        )
+    except Exception as e:
+        return JSONResponse(
+            status_code=200,
+            content={"ok": False, "online": False, "error": str(e)},
+        )
 
 
 # ==============================================================================

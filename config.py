@@ -7,6 +7,9 @@ class UART:
 class Server:
     HOST = "0.0.0.0"
     PORT = 8000
+    SSL_CERTFILE = "certs/server.crt"
+    SSL_KEYFILE = "certs/server.key"
+    CA_CERTFILE = "certs/ca.crt"
 
 
 class Safety:
