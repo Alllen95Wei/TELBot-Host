@@ -19,12 +19,11 @@ STATIC_DIR = PANEL_DIR / "static"
 ROOT_DIR = PANEL_DIR.parent
 sys.path.append(str(ROOT_DIR))
 
-from comms import PartType, UARTComm
 from config import Camera as CameraConfig
 from config import Field as FieldConfig
 from config import Server as ServerConfig
 from config import UART as UARTConfig
-from pose import PoseEstimator
+from core import PartType, PoseEstimator, UARTComm
 
 logger = logging.getLogger("TELBot.Server")
 
