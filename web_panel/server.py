@@ -76,6 +76,10 @@ def get_match_manager() -> MatchManager:
     return getattr(app.state, "match_manager", match_manager)
 
 
+# Active video streaming proxy writers to cleanly tear down on shutdown
+_active_stream_writers: set[asyncio.StreamWriter] = set()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
@@ -95,6 +99,14 @@ async def lifespan(app: FastAPI):
             logger.error(f"Failed to start UART worker threads: {e}")
 
     yield
+
+    # Terminate any active uStreamer proxy connections on server shutdown
+    for w in list(_active_stream_writers):
+        try:
+            w.close()
+        except Exception:
+            pass
+    _active_stream_writers.clear()
 
     if managed_internally:
         logger.info("Shutting down UART communication workers (standalone mode)...")
@@ -523,6 +535,8 @@ async def proxy_video_stream(
             detail=f"uStreamer /stream returned HTTP {status_code}",
         )
 
+    _active_stream_writers.add(writer)
+
     content_type = headers.get(
         "content-type", "multipart/x-mixed-replace;boundary=boundarydonotcross"
     )
@@ -534,9 +548,10 @@ async def proxy_video_stream(
                 if not chunk:
                     break
                 yield chunk
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, ConnectionResetError):
             pass
         finally:
+            _active_stream_writers.discard(writer)
             writer.close()
             try:
                 await writer.wait_closed()
