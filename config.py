@@ -73,3 +73,4 @@ class Match:
     # Operator safety & match transition flags
     LOCK_CONTROLLER_IN_AUTO = True
     REQUIRE_MANUAL_TELEOP_START = True  # After auto, operator must explicitly enable Tele-Op
+    AUTO_SWITCH_MODE = False

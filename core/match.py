@@ -40,11 +40,13 @@ class MatchManager:
         auto_duration_s: float = MatchConfig.AUTO_DURATION_S,
         teleop_duration_s: float = MatchConfig.TELEOP_DURATION_S,
         lock_controller_in_auto: bool = MatchConfig.LOCK_CONTROLLER_IN_AUTO,
+        auto_switch_mode: bool = MatchConfig.AUTO_SWITCH_MODE,
         on_stop_required: Optional[Callable[[], None]] = None,
     ) -> None:
         self.auto_duration_s = float(auto_duration_s)
         self.teleop_duration_s = float(teleop_duration_s)
         self.lock_controller_in_auto = lock_controller_in_auto
+        self.auto_switch_mode = auto_switch_mode
         self.on_stop_required = on_stop_required
 
         self._lock = threading.Lock()
@@ -121,7 +123,7 @@ class MatchManager:
         with self._lock:
             if self._mode == MatchMode.AUTO and self._phase_duration > 0:
                 elapsed = time.monotonic() - self._phase_start_time
-                if elapsed >= self._phase_duration:
+                if self.auto_switch_mode and elapsed >= self._phase_duration:
                     self._mode = MatchMode.AUTO_WAIT
                     self._phase_start_time = time.monotonic()
                     self._phase_duration = 0.0
@@ -133,7 +135,7 @@ class MatchManager:
 
             elif self._mode == MatchMode.TELEOP and self._phase_duration > 0:
                 elapsed = time.monotonic() - self._phase_start_time
-                if elapsed >= self._phase_duration:
+                if self.auto_switch_mode and elapsed >= self._phase_duration:
                     self._mode = MatchMode.MATCH_OVER
                     self._phase_start_time = time.monotonic()
                     self._phase_duration = 0.0
@@ -203,6 +205,7 @@ class MatchManager:
             "auto_duration": self.auto_duration_s,
             "teleop_duration": self.teleop_duration_s,
             "teleop_allowed": teleop_allowed,
+            "auto_switch": self.auto_switch_mode,
             "status_message": reason,
         }
 
