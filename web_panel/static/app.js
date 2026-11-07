@@ -147,7 +147,8 @@ const lastSentCmd = {
   vy: 0,
   omega: 0,
   flywheel: 0,
-  angle: 0,
+  angle_run: false,
+  angle_reversed: false,
   trigger: 0,
   spinner_run: false,
   spinner_reversed: false,
@@ -675,16 +676,28 @@ function controlTick() {
   const vy = controllerState.connected ? evaluateMappedAxis("vy", true) : 0;
   const omega = controllerState.connected ? evaluateMappedAxis("omega", true) : 0;
 
-  // 2. Evaluate Shooter (Flywheel + Pitch Angle)
+  // 2. Evaluate Shooter (Flywheel + Pitch Angle Stepper)
   const shootActive =
     controllerState.connected &&
     (toggleState.shooterActive || isActionHeld("shooter_hold"));
   const flywheel = shootActive ? mappingConfig.shooterSpeed : 0;
 
-  let angle = controllerState.connected ? evaluateMappedAxis("angle", false) : 0;
+  let angleRun = false;
+  let angleReversed = false;
   if (controllerState.connected) {
-    if (isActionHeld("angle_up_hold")) angle = 600;
-    else if (isActionHeld("angle_down_hold")) angle = -600;
+    if (isActionHeld("angle_up_hold")) {
+      angleRun = true;
+      angleReversed = false;
+    } else if (isActionHeld("angle_down_hold")) {
+      angleRun = true;
+      angleReversed = true;
+    } else {
+      const angleAxis = evaluateMappedAxis("angle", false);
+      if (Math.abs(angleAxis) >= 300) {
+        angleRun = true;
+        angleReversed = angleAxis < 0;
+      }
+    }
   }
 
   // 3. Evaluate Conveyor (Trigger + Spinner)
@@ -701,7 +714,8 @@ function controlTick() {
   document.getElementById("cmd-vy").textContent = vy;
   document.getElementById("cmd-omega").textContent = omega;
   document.getElementById("cmd-flywheel").textContent = flywheel;
-  document.getElementById("cmd-angle").textContent = angle;
+  document.getElementById("cmd-angle").textContent =
+    angleRun ? (angleReversed ? "REV" : "FWD") : "OFF";
   document.getElementById("cmd-conveyor").textContent =
     `${trigger} | ${spinnerRun ? (spinnerReversed ? "REV" : "FWD") : "OFF"}`;
 
@@ -734,13 +748,20 @@ function controlTick() {
   // Send shooter command when changed or active
   if (
     flywheel !== lastSentCmd.flywheel ||
-    angle !== lastSentCmd.angle ||
+    angleRun !== lastSentCmd.angle_run ||
+    angleReversed !== lastSentCmd.angle_reversed ||
     flywheel !== 0 ||
-    angle !== 0
+    angleRun
   ) {
-    sendWsJson({ type: "shooter", flywheel, angle });
+    sendWsJson({
+      type: "shooter",
+      flywheel,
+      angle_run: angleRun,
+      angle_reversed: angleReversed,
+    });
     lastSentCmd.flywheel = flywheel;
-    lastSentCmd.angle = angle;
+    lastSentCmd.angle_run = angleRun;
+    lastSentCmd.angle_reversed = angleReversed;
   }
 
   // Send conveyor command when changed or active

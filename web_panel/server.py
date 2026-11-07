@@ -197,11 +197,17 @@ class DriveRequest(BaseModel):
 
 class ShooterRequest(BaseModel):
     flywheel: int = Field(default=0, ge=-1000, le=1000, description="Flywheel speed (-1000 to +1000)")
-    angle: int = Field(default=0, ge=-1000, le=1000, description="Pitch angle adjustment speed (-1000 to +1000)")
+    angle_run: bool = Field(default=False, description="Whether pitch angle stepper is running")
+    angle_reversed: bool = Field(default=False, description="Whether pitch angle direction is reversed")
 
 
 class ShooterFlywheelRequest(BaseModel):
     speed: int = Field(default=0, ge=-1000, le=1000, description="Flywheel speed only (-1000 to +1000)")
+
+
+class ShooterAngleRequest(BaseModel):
+    run: bool = Field(default=True, description="Whether pitch angle stepper is running")
+    reversed: bool = Field(default=False, description="Whether pitch angle direction is reversed")
 
 
 class ConveyorRequest(BaseModel):
@@ -427,15 +433,20 @@ def drive_robot(req: DriveRequest):
 @app.post("/api/shooter")
 def control_shooter(req: ShooterRequest):
     """
-    Controls shooter flywheels and pitch angle adjustment.
+    Controls shooter flywheels and pitch angle stepper state (run, reversed).
     """
     comm = _require_teleop_allowed()
-    comm.send_shooter_command(flywheel=req.flywheel, angle=req.angle)
+    comm.send_shooter_command(
+        flywheel=req.flywheel,
+        angle_run=req.angle_run,
+        angle_reversed=req.angle_reversed,
+    )
     return {
         "status": "enqueued",
         "subsystem": "shooter",
         "flywheel": req.flywheel,
-        "angle": req.angle,
+        "angle_run": req.angle_run,
+        "angle_reversed": req.angle_reversed,
     }
 
 
@@ -447,6 +458,21 @@ def control_shooter_flywheel(req: ShooterFlywheelRequest):
     comm = _require_teleop_allowed()
     comm.send_shooter_flywheel(speed=req.speed)
     return {"status": "enqueued", "subsystem": "shooter", "flywheel": req.speed}
+
+
+@app.post("/api/shooter/angle")
+def control_shooter_angle(req: ShooterAngleRequest):
+    """
+    Sets only the shooter pitch angle stepper state (run: bool, reversed: bool).
+    """
+    comm = _require_teleop_allowed()
+    comm.send_shooter_angle(run=req.run, reversed=req.reversed)
+    return {
+        "status": "enqueued",
+        "subsystem": "shooter",
+        "angle_run": req.run,
+        "angle_reversed": req.reversed,
+    }
 
 
 @app.post("/api/conveyor")
@@ -685,7 +711,7 @@ async def websocket_control(websocket: WebSocket):
     WebSocket endpoint for real-time WebHID / Gamepad input stream.
     Receives JSON messages such as:
       {"type": "drive", "vx": 300, "vy": 0, "omega": -100}
-      {"type": "shooter", "flywheel": 800, "angle": 0}
+      {"type": "shooter", "flywheel": 800, "angle_run": true, "angle_reversed": false}
       {"type": "conveyor", "trigger": 500, "spinner_run": true, "spinner_reversed": false}
       {"type": "stop", "part": 0}
     """
@@ -711,8 +737,13 @@ async def websocket_control(websocket: WebSocket):
 
             elif msg_type == "shooter":
                 flywheel = int(data.get("flywheel", 0))
-                angle = int(data.get("angle", 0))
-                accepted = comm.send_shooter_command(flywheel=flywheel, angle=angle)
+                angle_run = bool(data.get("angle_run", False))
+                angle_reversed = bool(data.get("angle_reversed", False))
+                accepted = comm.send_shooter_command(
+                    flywheel=flywheel,
+                    angle_run=angle_run,
+                    angle_reversed=angle_reversed,
+                )
 
             elif msg_type == "conveyor":
                 trigger = int(data.get("trigger", 0))
