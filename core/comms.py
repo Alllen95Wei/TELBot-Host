@@ -217,7 +217,7 @@ class Packet:
         angle_run: whether pitch angle stepper (TB6560) is running
         angle_reversed: whether pitch angle direction is reversed
         """
-        payload = struct.pack("<h??", flywheel, angle_run, angle_reversed)
+        payload = struct.pack("<hBB", flywheel, int(bool(angle_run)), int(bool(angle_reversed)))
         return cls(cmd=CmdType.RUN, part=PartType.SHOOTER, payload=payload, seq=seq)
 
     @classmethod
@@ -231,28 +231,29 @@ class Packet:
         cls, run: bool = True, reversed: bool = False, seq: int = 0
     ) -> "Packet":
         """Sets shooter pitch angle stepper state only (run: bool, reversed: bool)."""
-        payload = struct.pack("<B??", 0, run, reversed)
+        payload = struct.pack("<BBB", 0, int(bool(run)), int(bool(reversed)))
         return cls(cmd=CmdType.RUN, part=PartType.SHOOTER, payload=payload, seq=seq)
 
     @classmethod
     def create_shooter_disable_angle(cls, seq: int = 0) -> "Packet":
         """Disables the shooter pitch angle stepper driver (energizes EN pin)."""
-        payload = struct.pack("<?", False)
+        payload = struct.pack("<B", 0)
         return cls(cmd=CmdType.RUN, part=PartType.SHOOTER, payload=payload, seq=seq)
 
     def parse_shooter_command(self) -> Tuple[int, bool, bool]:
         """
         Unpacks shooter command.
-        If payload has 4 bytes (<h??): returns (flywheel, angle_run, angle_reversed).
-        If payload has 3 bytes (<B??): returns (0, angle_run, angle_reversed).
+        If payload has 4 bytes (<hBB): returns (flywheel, angle_run, angle_reversed).
+        If payload has 3 bytes (<BBB): returns (0, angle_run, angle_reversed).
         If payload has 2 bytes (<h): returns (flywheel, False, False).
-        If payload has 1 byte (<?): returns (0, False, False).
+        If payload has 1 byte (<B): returns (0, False, False).
         """
         if len(self.payload) == 4:
-            return struct.unpack("<h??", self.payload)
+            flywheel, run, rev = struct.unpack("<hBB", self.payload)
+            return (flywheel, bool(run), bool(rev))
         elif len(self.payload) == 3:
-            _, run, rev = struct.unpack("<B??", self.payload)
-            return (0, run, rev)
+            _, run, rev = struct.unpack("<BBB", self.payload)
+            return (0, bool(run), bool(rev))
         elif len(self.payload) == 2:
             (flywheel,) = struct.unpack("<h", self.payload)
             return (flywheel, False, False)
@@ -273,7 +274,7 @@ class Packet:
         spinner_run: whether feeder spinner is running
         spinner_reversed: whether spinner rotation direction is reversed
         """
-        payload = struct.pack("<h??", trigger, spinner_run, spinner_reversed)
+        payload = struct.pack("<hBB", trigger, int(bool(spinner_run)), int(bool(spinner_reversed)))
         return cls(cmd=CmdType.RUN, part=PartType.CONVEYOR, payload=payload, seq=seq)
 
     @classmethod
@@ -287,26 +288,26 @@ class Packet:
         cls, run: bool = True, reversed: bool = False, seq: int = 0
     ) -> "Packet":
         """Sets conveyor spinner state only (run: bool, reversed: bool)."""
-        payload = struct.pack("<??", run, reversed)
+        payload = struct.pack("<BBB", 0, int(bool(run)), int(bool(reversed)))
         return cls(cmd=CmdType.RUN, part=PartType.CONVEYOR, payload=payload, seq=seq)
 
     def parse_conveyor_command(self) -> Tuple[int, bool, bool]:
         """
         Unpacks conveyor command.
-        If payload has 4 bytes (<h??): returns (trigger, spinner_run, spinner_reversed).
+        If payload has 4 bytes (<hBB): returns (trigger, spinner_run, spinner_reversed).
+        If payload has 3 bytes (<BBB): returns (0, spinner_run, spinner_reversed).
         If payload has 2 bytes (<h): returns (trigger, False, False).
-        If payload has 2 bytes (<??): returns (0, spinner_run, spinner_reversed).
         """
         if len(self.payload) == 4:
-            return struct.unpack("<h??", self.payload)
+            trigger, run, rev = struct.unpack("<hBB", self.payload)
+            return (trigger, bool(run), bool(rev))
+        elif len(self.payload) == 3:
+            _, run, rev = struct.unpack("<BBB", self.payload)
+            return (0, bool(run), bool(rev))
         elif len(self.payload) == 2:
-            try:
-                (trigger,) = struct.unpack("<h", self.payload)
-                return (trigger, False, False)
-            except struct.error:
-                run, rev = struct.unpack("<??", self.payload)
-                return (0, run, rev)
-        raise ValueError(f"Conveyor payload expected 2 or 4 bytes, got {len(self.payload)}")
+            (trigger,) = struct.unpack("<h", self.payload)
+            return (trigger, False, False)
+        raise ValueError(f"Conveyor payload expected 2, 3, or 4 bytes, got {len(self.payload)}")
 
     # --- Sensor Telemetry (PartType.SENSORS) ---
     @classmethod
