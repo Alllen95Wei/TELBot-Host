@@ -234,12 +234,19 @@ class Packet:
         payload = struct.pack("<B??", 0, run, reversed)
         return cls(cmd=CmdType.RUN, part=PartType.SHOOTER, payload=payload, seq=seq)
 
+    @classmethod
+    def create_shooter_disable_angle(cls, seq: int = 0) -> "Packet":
+        """Disables the shooter pitch angle stepper driver (energizes EN pin)."""
+        payload = struct.pack("<?", False)
+        return cls(cmd=CmdType.RUN, part=PartType.SHOOTER, payload=payload, seq=seq)
+
     def parse_shooter_command(self) -> Tuple[int, bool, bool]:
         """
         Unpacks shooter command.
         If payload has 4 bytes (<h??): returns (flywheel, angle_run, angle_reversed).
         If payload has 3 bytes (<B??): returns (0, angle_run, angle_reversed).
         If payload has 2 bytes (<h): returns (flywheel, False, False).
+        If payload has 1 byte (<?): returns (0, False, False).
         """
         if len(self.payload) == 4:
             return struct.unpack("<h??", self.payload)
@@ -249,7 +256,11 @@ class Packet:
         elif len(self.payload) == 2:
             (flywheel,) = struct.unpack("<h", self.payload)
             return (flywheel, False, False)
-        raise ValueError(f"Shooter payload expected 2, 3, or 4 bytes, got {len(self.payload)}")
+        elif len(self.payload) == 1:
+            return (0, False, False)
+        raise ValueError(
+            f"Shooter payload expected 1, 2, 3, or 4 bytes, got {len(self.payload)}"
+        )
 
     # --- Conveyor Subsystem (PartType.CONVEYOR) ---
     @classmethod
@@ -636,6 +647,11 @@ class UARTComm:
     ) -> bool:
         """Enqueues a shooter pitch angle stepper command (run: bool, reversed: bool)."""
         pkt = Packet.create_shooter_angle(run=run, reversed=reversed)
+        return self.send_packet(pkt, priority=priority)
+
+    def send_shooter_disable_angle(self, priority: int = 2) -> bool:
+        """Enqueues a command to disable the shooter pitch angle stepper driver."""
+        pkt = Packet.create_shooter_disable_angle()
         return self.send_packet(pkt, priority=priority)
 
     def send_conveyor_command(

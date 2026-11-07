@@ -57,6 +57,7 @@ const BUTTON_ACTIONS = [
   { id: "conveyor_spinner_rev_hold", label: "Conveyor Spinner Reverse (Hold)", short: "Spin Rev" },
   { id: "angle_up_hold", label: "Shooter Angle Up (Hold)", short: "Pitch +" },
   { id: "angle_down_hold", label: "Shooter Angle Down (Hold)", short: "Pitch -" },
+  { id: "angle_disable", label: "Shooter Angle Disable (Release)", short: "Pitch Off" },
   { id: "zero_all", label: "Zero All Latch States", short: "Reset States" },
   { id: "none", label: "Unassigned (None)", short: "---" },
 ];
@@ -530,6 +531,8 @@ function processButtonEdges() {
         toggleState.shooterActive = !toggleState.shooterActive;
       } else if (action === "conveyor_spinner_toggle") {
         toggleState.spinnerActive = !toggleState.spinnerActive;
+      } else if (action === "angle_disable") {
+        sendWsJson({ type: "shooter_disable_angle" });
       } else if (action === "zero_all") {
         toggleState.shooterActive = false;
         toggleState.spinnerActive = false;

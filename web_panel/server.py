@@ -475,6 +475,20 @@ def control_shooter_angle(req: ShooterAngleRequest):
     }
 
 
+@app.post("/api/shooter/angle/disable")
+def disable_shooter_angle():
+    """
+    Disables the shooter pitch angle stepper driver (de-energizes TB6560 EN pin).
+    """
+    comm = _require_ready_uart()
+    comm.send_shooter_disable_angle()
+    return {
+        "status": "enqueued",
+        "subsystem": "shooter",
+        "angle_enabled": False,
+    }
+
+
 @app.post("/api/conveyor")
 def control_conveyor(req: ConveyorRequest):
     """
@@ -744,6 +758,9 @@ async def websocket_control(websocket: WebSocket):
                     angle_run=angle_run,
                     angle_reversed=angle_reversed,
                 )
+
+            elif msg_type == "shooter_disable_angle":
+                accepted = comm.send_shooter_disable_angle()
 
             elif msg_type == "conveyor":
                 trigger = int(data.get("trigger", 0))
