@@ -1,19 +1,55 @@
 # About this project
 This project is aiming to build communications between robot operators, robot sensors, and co-processor (RPi Pico W) on the robot.
 
-## Structure in real life
-Our robot has the following design:
-- RPi 5 (This machine) plays as "host". It should be able to:
-  - receive the commands from human and send standardized data to slave;
-  - receive sensor data from slave, process them, and adjust/calculate the signal sent to the motors (via slave).
-- RPi Pico W plays as "slave". It should be able to:
-  - read commands from host and convert them into signals to motor;
-  - constantly read data from sensors and send them back to host.
-> The communication between RPi 5 and RPi Pico W is using UART.
-> Since Pico needs a different language, we don't implement its code in this project. We only need to focus on the "host".
+## Game details
+The game is to build a robot that shoots soft baseballs into a 3x3 grid.
+Every ball that's counted as IN is scored 2 pts, with maximum of 4 for each grid.
+For line ups:
+- Diagonal: 8 pts
+- Horizontal: 2 pts
+- Vertical: 4 pts
 
-# Technical targets & aimings
-1. TX and RX in UART should be able to process in real-time. That is, making TX an RX two parallel jobs that keep running.
-2. User should be able to control the robot via a web panel.
-  - The web should use `WebHID` API to read joysticks' inputs, and send the signal back using API.
-  - As mentioned, an lightweight API server should be hosted.
+A game is consisted of 2 phases:
+1. Autonomous (1:00)
+2. Tele-Op (2:00)
+During Auto, the robot shall not receive any commands from remote controllers.
+After that, drivers take the control until the end.
+
+## Planned control framework
+Currently, this project has implemented a complete framework for human to send control commands to RPi Pico W "slave" via UART and network; Pico will control the motors based on received UART packets.
+
+# Next steps
+We still need additional work on:
+- Ability to receive sensor data: our sensors are all attached on an ESP32, which is not planned in the previous progress.
+- Pose estimation: Since the robot must be operated in auto for the first minute, it must be able to calculate its current pose on field based on the following data:
+  - 3 distance sensors on robot (it's a Lidar, but it only picks 3 directions: front, left, and right)
+  - geomagnetic direction
+- Mode switching: As mentioned, we haven't designed an auto mode. It shall be able to:
+  - executes a fixed process defined via a script or web UI
+  - be enabled via web UI
+
+# Undetermined Questions / Design Decisions
+
+## 1. ESP32 Interface & Protocol
+- **Physical Connection**: Will ESP32 connect via USB serial (`/dev/ttyUSB0` or `/dev/ttyACM0`) or RPi 5 secondary GPIO UART (`/dev/ttyAMA1`)?
+- **Wire Protocol**: 
+  - Standard binary framed packet (matching Pico W: `[0xAA, 0x55][LEN][SEQ][CMD=TELEMETRY][PART=SENSORS][PAYLOAD][CRC8]` packed as `<HHHh`)?
+  - Or newline-delimited text (`JSON` or `CSV`, e.g. `{"f": 1200, "l": 800, "r": 850, "h": 45.2}\n`)?
+- **Streaming Rate & Baud Rate**: What baud rate (e.g. 115200) and publish frequency (e.g. 20 Hz, 50 Hz, 100 Hz)?
+
+## 2. Sensor Placement & Characteristics
+- **LiDAR Placement & Offsets**: What are the physical mounting offsets $(dx, dy)$ of the 3 distance sensors relative to the robot's center of rotation?
+- **LiDAR Specs & Units**: What is the effective range (min/max in mm or cm) and blind zone?
+- **Geomagnetic Heading**: Does the sensor output absolute azimuth ($0^\circ \sim 360^\circ$ relative to magnetic north) or relative angle? Do we need a "Zero Heading / Calibrate" action on the Web UI before starting the match?
+
+## 3. Field Dimensions & Coordinates
+- **Field Size**: **Confirmed** — `500 cm` (Top to Bottom, Y-axis) $\times$ `400 cm` (Left to Right, X-axis).
+- **Coordinate System**: **Confirmed** — Origin $(0, 0)$ is at the bottom-left corner; the 3x3 target grid is on the top wall ($y = 500\text{ cm}$, $0^\circ$ heading faces Top).
+- **Target Grid Location**: Exact horizontal X-coordinates / dimensions of the 3x3 goal grid along the top wall ($y = 500\text{ cm}$) to be measured.
+- **Obstacle Rejection**: **Confirmed** — `PoseEstimator` automatically records the latest valid distances of `L` and `R`; when dual-beam span validation fails, it computes the delta between the previous valid value and the current reading for each side, using only the beam with the smaller delta.
+
+## 4. Autonomous Mode & Workflow
+- **Auto Routine Storage**: Should the routine be defined in a JSON file (e.g. `auto_routines.json`), a Python script, or editable directly in the Web UI?
+- **Motion Control**: Should Auto use closed-loop target pose navigation ($x, y, \theta$ P/PID controller), timed open-loop drive, or a hybrid sequence?
+- **Match Transition**: When the 1:00 Auto period expires, does Tele-Op unlock automatically, or does it require an explicit driver "Enable Tele-Op" trigger from the Web UI?
+
