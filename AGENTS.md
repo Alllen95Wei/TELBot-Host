@@ -8,6 +8,8 @@ For line ups:
 - Diagonal: 8 pts
 - Horizontal: 2 pts
 - Vertical: 4 pts
+Besides 3x3 grids, there's also a special row of 1x3 grids. During auto phases, one of three grids will become "active"; if a ball is goaled into the enabled one, 4 pts will be scored, 2 balls max.
+The grid is placed in the top side of the field, aligned w/ the field. The gap between columns is 60 cm.
 
 A game is consisted of 2 phases:
 1. Autonomous (1:00)
@@ -17,6 +19,7 @@ After that, drivers take the control until the end.
 
 ## Planned control framework
 Currently, this project has implemented a complete framework for human to send control commands to RPi Pico W "slave" via UART and network; Pico will control the motors based on received UART packets.
+For special row, it requires vision processing to detect which one is "active"; but processing would be done by operator's laptop.
 
 # Next steps
 We still need additional work on:
@@ -27,6 +30,14 @@ We still need additional work on:
 - Mode switching: As mentioned, we haven't designed an auto mode. It shall be able to:
   - executes a fixed process defined via a script or web UI
   - be enabled via web UI
+- "Active" field data receiving: Operator's laptop will deploy YOLO and process video stream from RPi, then send back the following data:
+```json
+{
+  "timestamp": 0,
+  "active_target": "left/center/right/none",
+  "target_detected": false,
+}
+```
 
 # Undetermined Questions / Design Decisions
 
