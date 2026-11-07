@@ -165,6 +165,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("host-origin-label").textContent = window.location.origin;
 
   initThemeToggle();
+  initMatchControls();
   initButtonGridUI();
   initMappingUI();
   initVideoControls();
@@ -704,6 +705,17 @@ function controlTick() {
   document.getElementById("cmd-conveyor").textContent =
     `${trigger} | ${spinnerRun ? (spinnerReversed ? "REV" : "FWD") : "OFF"}`;
 
+  const armedLabel = document.getElementById("control-armed-label");
+  if (armedLabel) {
+    if (!controlArmed) {
+      armedLabel.textContent = "Monitor Only (Disarmed)";
+    } else if (!currentMatchState.teleop_allowed) {
+      armedLabel.textContent = `Locked (${currentMatchState.mode.toUpperCase()})`;
+    } else {
+      armedLabel.textContent = "Control Armed (25 Hz)";
+    }
+  }
+
   if (!controlArmed || !wsConnected) return;
 
   // Send drive continuously while connected or when transitioning back to 0
@@ -851,6 +863,9 @@ function updateStatusFromWs(msg) {
     document.getElementById("battery-text").textContent =
       `${msg.telemetry.battery_v.toFixed(2)} V`;
   }
+  if (msg.match) {
+    updateMatchUI(msg.match);
+  }
   if (msg.pose) {
     updatePoseUI(msg.pose);
   }
@@ -870,6 +885,9 @@ function initStatusPolling() {
         if (data.latest_telemetry && typeof data.latest_telemetry.battery_v === "number") {
           document.getElementById("battery-text").textContent =
             `${data.latest_telemetry.battery_v.toFixed(2)} V`;
+        }
+        if (data.match) {
+          updateMatchUI(data.match);
         }
         if (data.pose) {
           updatePoseUI(data.pose);
@@ -910,6 +928,165 @@ function initStatusPolling() {
 
   poll();
   setInterval(poll, 1500);
+}
+
+// ============================================================================
+// Match Phase & Transition Management (Auto 1:00 -> AUTO_WAIT -> Tele-Op 2:00)
+// ============================================================================
+let currentMatchState = {
+  mode: "disarmed",
+  phase_time_remaining: 0.0,
+  phase_time_elapsed: 0.0,
+  phase_duration: 0.0,
+  auto_duration: 60.0,
+  teleop_duration: 120.0,
+  teleop_allowed: false,
+  status_message: "Robot is disarmed. Enable Tele-Op to drive",
+  last_updated: Date.now(),
+};
+
+function formatTime(seconds) {
+  const s = Math.max(0, Math.ceil(seconds));
+  const m = Math.floor(s / 60);
+  const remSec = s % 60;
+  return `${String(m).padStart(2, "0")}:${String(remSec).padStart(2, "0")}`;
+}
+
+function updateMatchUI(match) {
+  if (!match) return;
+  currentMatchState = {
+    ...currentMatchState,
+    ...match,
+    last_updated: Date.now(),
+  };
+
+  const chip = document.getElementById("match-mode-chip");
+  const icon = document.getElementById("match-mode-icon");
+  const text = document.getElementById("match-mode-text");
+  const timerDisplay = document.getElementById("match-timer-display");
+  const phaseLabel = document.getElementById("match-phase-label");
+  const statusMsg = document.getElementById("match-status-msg");
+  const enableTeleopBtn = document.getElementById("match-enable-teleop-btn");
+
+  if (!chip || !icon || !text || !timerDisplay || !phaseLabel || !statusMsg) return;
+
+  // Clear mode specific styling and animations
+  chip.className = "match-mode-chip";
+  if (enableTeleopBtn) {
+    enableTeleopBtn.classList.remove("btn-pulse-teleop");
+  }
+
+  switch (match.mode) {
+    case "auto":
+      chip.classList.add("match-mode-auto");
+      icon.textContent = "smart_toy";
+      text.textContent = "AUTO (1:00)";
+      timerDisplay.textContent = formatTime(match.phase_time_remaining);
+      phaseLabel.textContent = "AUTONOMOUS TIME REMAINING";
+      statusMsg.textContent = "Autonomous mode active (60s)";
+      break;
+
+    case "auto_wait":
+      chip.classList.add("match-mode-auto_wait");
+      icon.textContent = "warning";
+      text.textContent = "AUTO DONE - WAITING FOR DRIVER";
+      timerDisplay.textContent = "00:00";
+      phaseLabel.textContent = "AWAITING OPERATOR TRIGGER";
+      statusMsg.textContent = "Click \"Enable Tele-Op\" to start driver control.";
+      if (enableTeleopBtn) {
+        enableTeleopBtn.classList.add("btn-pulse-teleop");
+      }
+      break;
+
+    case "teleop":
+      chip.classList.add("match-mode-teleop");
+      icon.textContent = "sports_esports";
+      text.textContent = "TELE-OP (2:00)";
+      timerDisplay.textContent = formatTime(match.phase_time_remaining);
+      phaseLabel.textContent = "TELE-OP TIME REMAINING";
+      statusMsg.textContent = "Tele-Op active (120s)";
+      break;
+
+    case "match_over":
+      chip.classList.add("match-mode-match_over");
+      icon.textContent = "sports_score";
+      text.textContent = "MATCH OVER";
+      timerDisplay.textContent = "00:00";
+      phaseLabel.textContent = "MATCH CONCLUDED";
+      statusMsg.textContent = "Match concluded (3:00 total). Reset match to drive.";
+      break;
+
+    case "practice":
+      chip.classList.add("match-mode-practice");
+      icon.textContent = "model_training";
+      text.textContent = "PRACTICE (UNLIMITED)";
+      timerDisplay.textContent = formatTime(match.phase_time_elapsed);
+      phaseLabel.textContent = "PRACTICE TIME ELAPSED";
+      statusMsg.textContent = "Practice mode active (Unlimited Tele-Op without match lockout).";
+      break;
+
+    case "disarmed":
+    default:
+      chip.classList.add("match-mode-disarmed");
+      icon.textContent = "lock";
+      text.textContent = "DISARMED";
+      timerDisplay.textContent = "00:00";
+      phaseLabel.textContent = "STANDBY";
+      statusMsg.textContent = match.status_message || "Robot is disarmed. Enable Tele-Op or Start Auto to begin.";
+      break;
+  }
+}
+
+function localMatchTimerTick() {
+  if (!currentMatchState || !currentMatchState.last_updated) return;
+  const elapsedSinceUpdate = (Date.now() - currentMatchState.last_updated) / 1000;
+  const timerDisplay = document.getElementById("match-timer-display");
+  if (!timerDisplay) return;
+
+  if (currentMatchState.mode === "auto" || currentMatchState.mode === "teleop") {
+    const rem = Math.max(0, currentMatchState.phase_time_remaining - elapsedSinceUpdate);
+    timerDisplay.textContent = formatTime(rem);
+  } else if (currentMatchState.mode === "practice") {
+    const el = currentMatchState.phase_time_elapsed + elapsedSinceUpdate;
+    timerDisplay.textContent = formatTime(el);
+  }
+}
+
+function initMatchControls() {
+  const postMatchAction = async (endpoint) => {
+    try {
+      const res = await fetch(endpoint, { method: "POST" });
+      if (res.ok) {
+        const data = await res.json();
+        updateMatchUI(data);
+      }
+    } catch (e) {
+      console.error(`Failed match action ${endpoint}:`, e);
+    }
+  };
+
+  const autoBtn = document.getElementById("match-start-auto-btn");
+  if (autoBtn) {
+    autoBtn.addEventListener("click", () => postMatchAction("/api/match/auto/start"));
+  }
+
+  const teleopBtn = document.getElementById("match-enable-teleop-btn");
+  if (teleopBtn) {
+    teleopBtn.addEventListener("click", () => postMatchAction("/api/match/teleop/enable"));
+  }
+
+  const practiceBtn = document.getElementById("match-start-practice-btn");
+  if (practiceBtn) {
+    practiceBtn.addEventListener("click", () => postMatchAction("/api/match/practice/start"));
+  }
+
+  const resetBtn = document.getElementById("match-reset-btn");
+  if (resetBtn) {
+    resetBtn.addEventListener("click", () => postMatchAction("/api/match/reset"));
+  }
+
+  // Smooth local timer countdown tick
+  setInterval(localMatchTimerTick, 200);
 }
 
 // ============================================================================

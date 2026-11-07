@@ -279,4 +279,97 @@ table.report-table td {
   margin-right: 4px;
 }
 
+/* ==========================================================================
+   Match Management & Competition Countdown Timer
+   ========================================================================== */
+.match-card {
+  margin-bottom: 12px;
+  padding: 12px 18px;
+  background: var(--surface-container-low);
+}
+
+.match-timer-display {
+  font-size: 2.2rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  line-height: 1.1;
+  color: var(--on-surface);
+}
+
+.match-mode-chip {
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 4px 12px;
+  border-radius: 9999px;
+  font-size: 0.85rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.match-mode-disarmed {
+  background: var(--surface-container-highest);
+  color: var(--outline);
+  border: 1px solid var(--outline-variant);
+}
+
+.match-mode-auto {
+  background: #f59e0b;
+  color: #000;
+  border: 1px solid #d97706;
+}
+
+.match-mode-auto_wait {
+  background: #ef4444;
+  color: #fff;
+  border: 1px solid #b91c1c;
+  animation: pulse-teleop-wait 1s infinite alternate;
+}
+
+.match-mode-teleop {
+  background: #10b981;
+  color: #000;
+  border: 1px solid #059669;
+}
+
+.match-mode-match_over {
+  background: #64748b;
+  color: #fff;
+  border: 1px solid #475569;
+}
+
+.match-mode-practice {
+  background: #06b6d4;
+  color: #000;
+  border: 1px solid #0891b2;
+}
+
+.btn-pulse-teleop {
+  animation: pulse-teleop-glow 1.1s infinite;
+  box-shadow: 0 0 14px rgba(16, 185, 129, 0.7);
+  border-color: #10b981 !important;
+}
+
+@keyframes pulse-teleop-glow {
+  0% {
+    transform: scale(1);
+    box-shadow: 0 0 6px rgba(16, 185, 129, 0.4);
+  }
+  50% {
+    transform: scale(1.05);
+    box-shadow: 0 0 18px rgba(16, 185, 129, 0.95);
+  }
+  100% {
+    transform: scale(1);
+    box-shadow: 0 0 6px rgba(16, 185, 129, 0.4);
+  }
+}
+
+@keyframes pulse-teleop-wait {
+  0% { opacity: 0.85; }
+  100% { opacity: 1; }
+}
+
+
 

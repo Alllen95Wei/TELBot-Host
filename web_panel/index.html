@@ -89,6 +89,61 @@
     </article>
 
     <!-- ===================================================================
+         Match Mode & Competition Countdown Timer Bar
+         =================================================================== -->
+    <article class="round border match-card">
+      <div class="row wrap space-between middle-align">
+        <!-- Match State & Status Message -->
+        <div class="row middle-align">
+          <i class="extra primary-text" id="match-icon">timer</i>
+          <div>
+            <div class="row middle-align" style="gap: 8px;">
+              <h6 class="no-margin bold">Match Phase &amp; Timers</h6>
+              <span id="match-mode-chip" class="match-mode-chip match-mode-disarmed">
+                <i id="match-mode-icon">lock</i>
+                <span id="match-mode-text">DISARMED</span>
+              </span>
+            </div>
+            <small class="mono" id="match-status-msg">Enable Tele-Op or Start Auto to begin match.</small>
+          </div>
+        </div>
+
+        <!-- Big Countdown Timer Display -->
+        <div class="row middle-align center-align" style="gap: 16px;">
+          <div>
+            <div class="mono match-timer-display" id="match-timer-display">00:00</div>
+            <div class="row center-align small-text mono" style="opacity: 0.8; margin: 0;">
+              <span id="match-phase-label">TIME REMAINING</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Operator Action Buttons -->
+        <div class="row wrap middle-align">
+          <button class="button small border round" id="match-start-auto-btn" title="Start Autonomous (1:00) - Controllers Locked">
+            <i>smart_toy</i>
+            <span>Start Auto (1:00)</span>
+          </button>
+
+          <button class="button small primary round" id="match-enable-teleop-btn" title="Enable Tele-Op (2:00) - Driver Control Active">
+            <i>sports_esports</i>
+            <span>Enable Tele-Op (2:00)</span>
+          </button>
+
+          <button class="button small border round" id="match-start-practice-btn" title="Free Practice Mode (No match lockout)">
+            <i>model_training</i>
+            <span>Practice</span>
+          </button>
+
+          <button class="button small border round" id="match-reset-btn" title="Reset match timers and return to Disarmed">
+            <i>restart_alt</i>
+            <span>Reset Match</span>
+          </button>
+        </div>
+      </div>
+    </article>
+
+    <!-- ===================================================================
          Main 2-Column Responsive Grid
          =================================================================== -->
     <div class="grid">

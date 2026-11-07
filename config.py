@@ -63,3 +63,13 @@ class PoseSensor:
     SPAN_TOLERANCE_CM = 30.0       # Max |x_L - x_R| discrepancy before L/R validation fails
     MAX_RAY_INCIDENCE_DEG = 35.0   # Max angle off wall normal to project a ray onto that wall
     MAX_FRONT_DELTA_CM = 80.0      # Max sudden single-step jump on Front ray before rejecting as obstacle
+
+
+class Match:
+    # Game phase durations in seconds
+    AUTO_DURATION_S = 60.0      # 1:00 Autonomous
+    TELEOP_DURATION_S = 120.0   # 2:00 Tele-Op
+
+    # Operator safety & match transition flags
+    LOCK_CONTROLLER_IN_AUTO = True
+    REQUIRE_MANUAL_TELEOP_START = True  # After auto, operator must explicitly enable Tele-Op

@@ -23,7 +23,7 @@ from config import Camera as CameraConfig
 from config import Field as FieldConfig
 from config import Server as ServerConfig
 from config import UART as UARTConfig
-from core import PartType, PoseEstimator, UARTComm
+from core import MatchManager, MatchMode, PartType, PoseEstimator, UARTComm
 
 logger = logging.getLogger("TELBot.Server")
 
@@ -36,6 +36,7 @@ uart = UARTComm(
     timeout=UARTConfig.TIMEOUT,
 )
 pose_estimator = PoseEstimator()
+match_manager = MatchManager(on_stop_required=lambda: uart.send_stop())
 
 
 def set_uart_comm(comm: UARTComm) -> None:
@@ -43,6 +44,7 @@ def set_uart_comm(comm: UARTComm) -> None:
     global uart
     uart = comm
     app.state.uart = comm
+    match_manager.on_stop_required = lambda: comm.send_stop()
 
 
 def get_uart_comm() -> UARTComm:
@@ -60,6 +62,18 @@ def set_pose_estimator(estimator: PoseEstimator) -> None:
 def get_pose_estimator() -> PoseEstimator:
     """Returns the active PoseEstimator instance."""
     return getattr(app.state, "pose_estimator", pose_estimator)
+
+
+def set_match_manager(manager: MatchManager) -> None:
+    """Injects an externally managed MatchManager instance (used by main.py)."""
+    global match_manager
+    match_manager = manager
+    app.state.match_manager = manager
+
+
+def get_match_manager() -> MatchManager:
+    """Returns the active MatchManager instance."""
+    return getattr(app.state, "match_manager", match_manager)
 
 
 @asynccontextmanager
@@ -127,6 +141,21 @@ def _require_ready_uart() -> UARTComm:
         raise HTTPException(
             status_code=423,
             detail="Emergency Stop (E-Stop) is active; motion commands are locked",
+        )
+    return comm
+
+
+def _require_teleop_allowed() -> UARTComm:
+    """
+    Validates that UART is ready, E-Stop is not active, and current match mode
+    permits human driver / tele-op commands.
+    """
+    comm = _require_ready_uart()
+    allowed, reason = get_match_manager().check_teleop_allowed()
+    if not allowed:
+        raise HTTPException(
+            status_code=423,
+            detail=f"Motion command rejected: {reason}",
         )
     return comm
 
@@ -199,9 +228,10 @@ class PoseCalibrateRequest(BaseModel):
 # ==============================================================================
 @app.get("/api/status")
 def get_status():
-    """Retrieve communication statistics, E-Stop state, queue depth, pose, and latest telemetry."""
+    """Retrieve communication statistics, E-Stop state, queue depth, match state, pose, and latest telemetry."""
     comm = get_uart_comm()
     estimator = get_pose_estimator()
+    match_mgr = get_match_manager()
     stats = comm.get_stats()
     telemetry = comm.latest_telemetry
     parsed_telem = None
@@ -218,9 +248,52 @@ def get_status():
         "status": "estop" if comm.estop_active else "ok",
         "estop_active": comm.estop_active,
         "stats": stats,
+        "match": match_mgr.get_status(),
         "latest_telemetry": parsed_telem,
         "pose": latest_pose.to_dict() if latest_pose is not None else None,
     }
+
+
+# ==============================================================================
+# Match Control Endpoints (Autonomous 1:00 -> AUTO_WAIT -> Tele-Op 2:00)
+# ==============================================================================
+@app.get("/api/match")
+def get_match_status():
+    """Returns the current match state, mode, timer, and teleop allowance."""
+    return get_match_manager().get_status()
+
+
+@app.post("/api/match/auto/start")
+def start_auto_phase():
+    """Starts the 1:00 Autonomous phase (locks controller input)."""
+    return get_match_manager().start_auto()
+
+
+@app.post("/api/match/teleop/enable")
+def enable_teleop_phase():
+    """
+    Operator trigger: enables the 2:00 Tele-Op phase (unlocks controller input).
+    Called manually after Auto completes or to begin driving.
+    """
+    return get_match_manager().enable_teleop()
+
+
+@app.post("/api/match/practice/start")
+def start_practice_phase():
+    """Starts unlimited Tele-Op practice mode without a match countdown timer."""
+    return get_match_manager().start_practice()
+
+
+@app.post("/api/match/disarm")
+def disarm_robot():
+    """Disarms robot, resets match state machine, and halts all motors."""
+    return get_match_manager().disarm()
+
+
+@app.post("/api/match/reset")
+def reset_match_phase():
+    """Resets match timers and returns robot to DISARMED state."""
+    return get_match_manager().reset_match()
 
 
 @app.get("/api/pose")
@@ -278,7 +351,7 @@ def drive_robot(req: DriveRequest):
     Appends a new chassis drive command into the TX PriorityQueue (Priority 2).
     Thread-safe and returns immediately.
     """
-    comm = _require_ready_uart()
+    comm = _require_teleop_allowed()
     comm.send_drive(vx=req.vx, vy=req.vy, omega=req.omega)
     return {"status": "enqueued", "subsystem": "chassis", "vx": req.vx, "vy": req.vy, "omega": req.omega}
 
@@ -288,7 +361,7 @@ def control_shooter(req: ShooterRequest):
     """
     Controls shooter flywheels and pitch angle adjustment.
     """
-    comm = _require_ready_uart()
+    comm = _require_teleop_allowed()
     comm.send_shooter_command(flywheel=req.flywheel, angle=req.angle)
     return {
         "status": "enqueued",
@@ -303,7 +376,7 @@ def control_shooter_flywheel(req: ShooterFlywheelRequest):
     """
     Sets only the shooter flywheel speed.
     """
-    comm = _require_ready_uart()
+    comm = _require_teleop_allowed()
     comm.send_shooter_flywheel(speed=req.speed)
     return {"status": "enqueued", "subsystem": "shooter", "flywheel": req.speed}
 
@@ -313,7 +386,7 @@ def control_conveyor(req: ConveyorRequest):
     """
     Controls all conveyor components: trigger motor speed and spinner state (run, reversed).
     """
-    comm = _require_ready_uart()
+    comm = _require_teleop_allowed()
     comm.send_conveyor_command(
         trigger=req.trigger,
         spinner_run=req.spinner_run,
@@ -333,7 +406,7 @@ def control_conveyor_trigger(req: ConveyorTriggerRequest):
     """
     Sets only the conveyor trigger motor speed.
     """
-    comm = _require_ready_uart()
+    comm = _require_teleop_allowed()
     comm.send_conveyor_trigger(speed=req.speed)
     return {"status": "enqueued", "subsystem": "conveyor", "trigger": req.speed}
 
@@ -343,7 +416,7 @@ def control_conveyor_spinner(req: ConveyorSpinnerRequest):
     """
     Sets only the conveyor spinner state (run: bool, reversed: bool).
     """
-    comm = _require_ready_uart()
+    comm = _require_teleop_allowed()
     comm.send_conveyor_spinner(run=req.run, reversed=req.reversed)
     return {
         "status": "enqueued",
@@ -554,8 +627,12 @@ async def websocket_control(websocket: WebSocket):
             data = await websocket.receive_json()
             msg_type = data.get("type")
             accepted = True
+            match_mgr = get_match_manager()
+            teleop_allowed, reason = match_mgr.check_teleop_allowed()
 
-            if msg_type == "drive":
+            if msg_type in ("drive", "shooter", "conveyor") and not teleop_allowed:
+                accepted = False
+            elif msg_type == "drive":
                 vx = int(data.get("vx", 0))
                 vy = int(data.get("vy", 0))
                 omega = int(data.get("omega", 0))
@@ -598,6 +675,7 @@ async def websocket_control(websocket: WebSocket):
                 "queue_depth": stats["queue_depth"],
                 "tx_packets": stats["tx_packets"],
                 "rx_packets": stats["rx_packets"],
+                "match": match_mgr.get_status(),
                 "telemetry": parsed_telem,
                 "pose": latest_pose.to_dict() if latest_pose is not None else None,
             })

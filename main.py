@@ -17,8 +17,8 @@ from config import EStop as EStopConfig
 from config import Safety as SafetyConfig
 from config import Server as ServerConfig
 from config import UART as UARTConfig
-from core import CmdType, Packet, PartType, PoseEstimator, UARTComm
-from web_panel.server import app, set_pose_estimator, set_uart_comm
+from core import CmdType, MatchManager, Packet, PartType, PoseEstimator, UARTComm
+from web_panel.server import app, set_match_manager, set_pose_estimator, set_uart_comm
 
 logger = logging.getLogger("TELBot.Main")
 
@@ -214,6 +214,7 @@ class RobotHost:
         self.latest_sensor_state: dict = {}
         self.last_ack_time: float = 0.0
         self.pose_estimator = PoseEstimator()
+        self.match_manager = MatchManager(on_stop_required=lambda: self.uart.send_stop())
 
         self.estop = EStopMonitor(
             chip_path=EStopConfig.CHIP,
@@ -298,12 +299,15 @@ class RobotHost:
 
             now = time.monotonic()
 
-            # 1. Periodic 200ms PING heartbeat to Pico
+            # 1. Periodic match state machine evaluation
+            self.match_manager.tick()
+
+            # 2. Periodic 200ms PING heartbeat to Pico
             if (now - last_ping) >= self.ping_interval:
                 self.uart.send_ping()
                 last_ping = now
 
-            # 2. Chassis operator timeout safeguard
+            # 3. Chassis operator timeout safeguard
             if (
                 not self.uart.estop_active
                 and self.uart.is_driving
@@ -352,6 +356,7 @@ class RobotHost:
             self.uart.start()
             set_uart_comm(self.uart)
             set_pose_estimator(self.pose_estimator)
+            set_match_manager(self.match_manager)
 
             # 2. Start physical E-Stop interrupt listener
             self.estop.start()

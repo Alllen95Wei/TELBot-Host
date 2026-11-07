@@ -51,5 +51,5 @@ We still need additional work on:
 ## 4. Autonomous Mode & Workflow
 - **Auto Routine Storage**: Should the routine be defined in a JSON file (e.g. `auto_routines.json`), a Python script, or editable directly in the Web UI?
 - **Motion Control**: Should Auto use closed-loop target pose navigation ($x, y, \theta$ P/PID controller), timed open-loop drive, or a hybrid sequence?
-- **Match Transition**: When the 1:00 Auto period expires, does Tele-Op unlock automatically, or does it require an explicit driver "Enable Tele-Op" trigger from the Web UI?
+- **Match Transition**: **Confirmed** — When 1:00 Auto expires, robot immediately stops all motors and enters `AUTO_WAIT`. Robot does not start Tele-Op automatically; operator must manually trigger "Enable Tele-Op" from Web UI to begin the 2:00 Tele-Op period.
 
