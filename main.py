@@ -13,12 +13,11 @@ import gpiod
 import uvicorn
 from gpiod.line import Bias, Direction, Edge, Value
 
-from comms import CmdType, Packet, PartType, UARTComm
 from config import EStop as EStopConfig
 from config import Safety as SafetyConfig
 from config import Server as ServerConfig
 from config import UART as UARTConfig
-from pose import PoseEstimator
+from core import CmdType, Packet, PartType, PoseEstimator, UARTComm
 from web_panel.server import app, set_pose_estimator, set_uart_comm
 
 logger = logging.getLogger("TELBot.Main")

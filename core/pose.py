@@ -1,8 +1,14 @@
 import math
+import sys
 import threading
 import time
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Optional, Tuple
+
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 from config import Field as FieldConfig
 from config import PoseSensor as PoseSensorConfig
