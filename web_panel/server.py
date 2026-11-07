@@ -5,6 +5,7 @@ import os
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,19 +21,22 @@ sys.path.append(str(ROOT_DIR))
 
 from comms import PartType, UARTComm
 from config import Camera as CameraConfig
+from config import Field as FieldConfig
 from config import Server as ServerConfig
 from config import UART as UARTConfig
+from pose import PoseEstimator
 
 logger = logging.getLogger("TELBot.Server")
 
 # ==============================================================================
-# Shared Hardware Communicator Instance (Injectable from main.py)
+# Shared Hardware Communicator & Pose Estimator (Injectable from main.py)
 # ==============================================================================
 uart = UARTComm(
     port=UARTConfig.PORT,
     baudrate=UARTConfig.BAUD_RATE,
     timeout=UARTConfig.TIMEOUT,
 )
+pose_estimator = PoseEstimator()
 
 
 def set_uart_comm(comm: UARTComm) -> None:
@@ -45,6 +49,18 @@ def set_uart_comm(comm: UARTComm) -> None:
 def get_uart_comm() -> UARTComm:
     """Returns the active UARTComm instance."""
     return getattr(app.state, "uart", uart)
+
+
+def set_pose_estimator(estimator: PoseEstimator) -> None:
+    """Injects an externally managed PoseEstimator instance (used by main.py)."""
+    global pose_estimator
+    pose_estimator = estimator
+    app.state.pose_estimator = estimator
+
+
+def get_pose_estimator() -> PoseEstimator:
+    """Returns the active PoseEstimator instance."""
+    return getattr(app.state, "pose_estimator", pose_estimator)
 
 
 @asynccontextmanager
@@ -157,13 +173,36 @@ class StopRequest(BaseModel):
     clear_pending_drive: bool = Field(default=True, description="Purge pending drive commands from queue")
 
 
+class PoseSensorUpdateRequest(BaseModel):
+    dist_front_cm: float = Field(..., description="Front LiDAR distance in cm")
+    dist_left_cm: float = Field(..., description="Left LiDAR distance in cm")
+    dist_right_cm: float = Field(..., description="Right LiDAR distance in cm")
+    raw_heading_deg: float = Field(..., description="Geomagnetic heading in degrees")
+
+
+class PoseCalibrateRequest(BaseModel):
+    raw_heading_deg: Optional[float] = Field(
+        default=None,
+        description="Raw heading reading to calibrate as target_field_deg (uses latest reading if omitted)",
+    )
+    target_field_deg: float = Field(
+        default=0.0,
+        description="Target field angle in degrees (default 0.0 = facing Top 3x3 grid wall)",
+    )
+    reset_history: bool = Field(
+        default=False,
+        description="Whether to clear cached valid LiDAR distances and pose history",
+    )
+
+
 # ==============================================================================
 # REST API Endpoints
 # ==============================================================================
 @app.get("/api/status")
 def get_status():
-    """Retrieve communication statistics, E-Stop state, queue depth, and latest telemetry."""
+    """Retrieve communication statistics, E-Stop state, queue depth, pose, and latest telemetry."""
     comm = get_uart_comm()
+    estimator = get_pose_estimator()
     stats = comm.get_stats()
     telemetry = comm.latest_telemetry
     parsed_telem = None
@@ -174,11 +213,63 @@ def get_status():
         except Exception:
             parsed_telem = {"raw_hex": telemetry.payload.hex()}
 
+    latest_pose = estimator.latest_pose
+
     return {
         "status": "estop" if comm.estop_active else "ok",
         "estop_active": comm.estop_active,
         "stats": stats,
         "latest_telemetry": parsed_telem,
+        "pose": latest_pose.to_dict() if latest_pose is not None else None,
+    }
+
+
+@app.get("/api/pose")
+def get_pose():
+    """Returns the latest field pose estimate and field dimensions."""
+    estimator = get_pose_estimator()
+    latest_pose = estimator.latest_pose
+    return {
+        "field": {
+            "width_cm": FieldConfig.WIDTH_CM,
+            "length_cm": FieldConfig.LENGTH_CM,
+        },
+        "heading_offset_deg": estimator.heading_offset_deg,
+        "pose": latest_pose.to_dict() if latest_pose is not None else None,
+    }
+
+
+@app.post("/api/pose/update")
+def update_pose(req: PoseSensorUpdateRequest):
+    """Updates the pose estimator with 3 LiDAR distances (cm) and geomagnetic heading (deg)."""
+    estimator = get_pose_estimator()
+    estimate = estimator.update(
+        dist_front_cm=req.dist_front_cm,
+        dist_left_cm=req.dist_left_cm,
+        dist_right_cm=req.dist_right_cm,
+        raw_heading_deg=req.raw_heading_deg,
+    )
+    return {"status": "ok", "pose": estimate.to_dict()}
+
+
+@app.post("/api/pose/calibrate")
+def calibrate_pose(req: PoseCalibrateRequest):
+    """Calibrates field heading zero-offset and/or resets cached valid LiDAR distances."""
+    estimator = get_pose_estimator()
+    if req.reset_history:
+        estimator.reset_history()
+
+    raw_heading = req.raw_heading_deg
+    if raw_heading is None and estimator.latest_pose is not None:
+        raw_heading = estimator.latest_pose.raw_heading_deg
+
+    if raw_heading is not None:
+        estimator.calibrate_heading(raw_heading, target_field_deg=req.target_field_deg)
+
+    return {
+        "status": "calibrated",
+        "heading_offset_deg": estimator.heading_offset_deg,
+        "reset_history": req.reset_history,
     }
 
 

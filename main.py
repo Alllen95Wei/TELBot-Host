@@ -18,7 +18,8 @@ from config import EStop as EStopConfig
 from config import Safety as SafetyConfig
 from config import Server as ServerConfig
 from config import UART as UARTConfig
-from web_panel.server import app, set_uart_comm
+from pose import PoseEstimator
+from web_panel.server import app, set_pose_estimator, set_uart_comm
 
 logger = logging.getLogger("TELBot.Main")
 
@@ -213,6 +214,7 @@ class RobotHost:
 
         self.latest_sensor_state: dict = {}
         self.last_ack_time: float = 0.0
+        self.pose_estimator = PoseEstimator()
 
         self.estop = EStopMonitor(
             chip_path=EStopConfig.CHIP,
@@ -266,10 +268,19 @@ class RobotHost:
 
     def process_sensor_feedback(self, sensor_data: dict) -> None:
         """
-        Hook for closed-loop sensor processing (e.g. battery cutoff, encoder PID,
-        or IMU heading correction).
+        Updates field pose estimation when 3-directional LiDAR + heading readings
+        are present, and provides a hook for closed-loop control.
         """
-        pass
+        if all(
+            k in sensor_data
+            for k in ("dist_front_cm", "dist_left_cm", "dist_right_cm", "heading_deg")
+        ):
+            self.pose_estimator.update(
+                dist_front_cm=float(sensor_data["dist_front_cm"]),
+                dist_left_cm=float(sensor_data["dist_left_cm"]),
+                dist_right_cm=float(sensor_data["dist_right_cm"]),
+                raw_heading_deg=float(sensor_data["heading_deg"]),
+            )
 
     # --------------------------------------------------------------------------
     # Async Safety & Heartbeat Task
@@ -341,6 +352,7 @@ class RobotHost:
             # 1. Start UART workers and share with FastAPI
             self.uart.start()
             set_uart_comm(self.uart)
+            set_pose_estimator(self.pose_estimator)
 
             # 2. Start physical E-Stop interrupt listener
             self.estop.start()
