@@ -226,6 +226,144 @@
             </div>
           </div>
         </article>
+
+        <!-- Section 2.5: Live 2D Field Pose Map (400cm x 500cm) -->
+        <article class="round border">
+          <div class="row wrap space-between middle-align">
+            <div class="row middle-align">
+              <i class="primary-text">explore</i>
+              <div>
+                <h6 class="no-margin">Live 2D Field Pose Map (400 &times; 500 cm)</h6>
+                <small class="mono">Origin (0, 0) = Bottom-Left | Top Wall (Y=500) = 3&times;3 Target Grid</small>
+              </div>
+            </div>
+
+            <div class="row wrap">
+              <span class="chip small" id="pose-status-chip">
+                <i id="pose-status-icon">radar</i>
+                <span id="pose-status-text">Awaiting Sensors</span>
+              </span>
+              <button class="button small border round" id="pose-zero-heading-btn" title="Set current heading as 0 deg (facing Top 3x3 Grid)">
+                <i>compass_calibration</i>
+                <span>Zero Heading (0&deg;)</span>
+              </button>
+              <button class="button small border round" id="pose-reset-btn" title="Clear cached valid LiDAR distances and trail">
+                <i>restart_alt</i>
+                <span>Reset History</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="small-space"></div>
+
+          <div class="grid">
+            <!-- 2D Canvas Column -->
+            <div class="s12 m6">
+              <div class="field-map-wrap">
+                <canvas id="field-map-canvas" width="400" height="500" title="Click anywhere on field to simulate robot pose"></canvas>
+              </div>
+              <div class="row center-align wrap small-text" style="margin-top: 6px; gap: 12px;">
+                <span><span class="legend-dot" style="background: #00e676;"></span>Valid Ray</span>
+                <span><span class="legend-dot" style="background: #ff5252;"></span>Rejected (Obstacle)</span>
+                <span><span class="legend-dot" style="background: #38bdf8;"></span>Robot Pose</span>
+              </div>
+            </div>
+
+            <!-- Numeric Pose & LiDAR Readouts + Test Simulator -->
+            <div class="s12 m6">
+              <div class="grid">
+                <div class="s4">
+                  <div class="cmd-metric">
+                    <div class="label">Pose X (L&rarr;R)</div>
+                    <div class="value mono" id="pose-x-val">---.- cm</div>
+                  </div>
+                </div>
+                <div class="s4">
+                  <div class="cmd-metric">
+                    <div class="label">Pose Y (B&rarr;T)</div>
+                    <div class="value mono" id="pose-y-val">---.- cm</div>
+                  </div>
+                </div>
+                <div class="s4">
+                  <div class="cmd-metric">
+                    <div class="label">Heading (&theta;)</div>
+                    <div class="value mono" id="pose-heading-val">---.-&deg;</div>
+                  </div>
+                </div>
+
+                <div class="s4">
+                  <div class="cmd-metric">
+                    <div class="label">Front LiDAR</div>
+                    <div class="value mono" id="lidar-front-val">--- cm</div>
+                  </div>
+                </div>
+                <div class="s4">
+                  <div class="cmd-metric">
+                    <div class="label">Left LiDAR</div>
+                    <div class="value mono" id="lidar-left-val">--- cm</div>
+                  </div>
+                </div>
+                <div class="s4">
+                  <div class="cmd-metric">
+                    <div class="label">Right LiDAR</div>
+                    <div class="value mono" id="lidar-right-val">--- cm</div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="small-space"></div>
+
+              <div class="cmd-metric">
+                <div class="label">Obstacle Rejection &amp; Last Valid Cache</div>
+                <div class="mono small-text" id="pose-validation-detail">
+                  L/R Status: --- | Cached Valid L: --- cm, R: --- cm
+                </div>
+              </div>
+
+              <div class="small-space"></div>
+
+              <!-- Interactive Sensor / Obstacle Simulator for testing before ESP32 is connected -->
+              <details open>
+                <summary class="small-text bold" style="cursor: pointer;">
+                  Sensor &amp; Obstacle Simulator (Click Map or Drag Sliders)
+                </summary>
+                <div class="small-space"></div>
+                <div class="grid">
+                  <div class="s6">
+                    <label class="small-text">Front: <span class="mono bold" id="sim-f-label">350 cm</span></label>
+                    <input type="range" id="sim-f-slider" min="5" max="500" step="1" value="350" style="width: 100%;" />
+                  </div>
+                  <div class="s6">
+                    <label class="small-text">Heading: <span class="mono bold" id="sim-h-label">0&deg;</span></label>
+                    <input type="range" id="sim-h-slider" min="0" max="359" step="1" value="0" style="width: 100%;" />
+                  </div>
+                  <div class="s6">
+                    <label class="small-text">Left: <span class="mono bold" id="sim-l-label">200 cm</span></label>
+                    <input type="range" id="sim-l-slider" min="5" max="400" step="1" value="200" style="width: 100%;" />
+                  </div>
+                  <div class="s6">
+                    <label class="small-text">Right: <span class="mono bold" id="sim-r-label">200 cm</span></label>
+                    <input type="range" id="sim-r-slider" min="5" max="400" step="1" value="200" style="width: 100%;" />
+                  </div>
+                </div>
+                <div class="row wrap" style="margin-top: 6px;">
+                  <button class="button small primary round" id="sim-send-btn">
+                    <i>send</i>
+                    <span>Send Sensor Reading</span>
+                  </button>
+                  <button class="button small border round" id="sim-obstacle-r-btn" title="Simulate an obstacle suddenly blocking Right LiDAR at 45 cm">
+                    <i>block</i>
+                    <span>Test Right Obstacle</span>
+                  </button>
+                  <button class="button small border round" id="sim-obstacle-l-btn" title="Simulate an obstacle suddenly blocking Left LiDAR at 45 cm">
+                    <i>block</i>
+                    <span>Test Left Obstacle</span>
+                  </button>
+                </div>
+              </details>
+            </div>
+          </div>
+        </article>
       </div>
 
       <!-- =================================================================

@@ -581,7 +581,7 @@ async def websocket_control(websocket: WebSocket):
                 part_val = int(data.get("part", PartType.ALL.value))
                 comm.send_stop(part=PartType(part_val))
 
-            # Read latest stats & telemetry snapshot to send back to client
+            # Read latest stats, pose & telemetry snapshot to send back to client
             stats = comm.get_stats()
             telem = comm.latest_telemetry
             parsed_telem = None
@@ -591,6 +591,8 @@ async def websocket_control(websocket: WebSocket):
                 except Exception:
                     pass
 
+            latest_pose = get_pose_estimator().latest_pose
+
             await websocket.send_json({
                 "estop_active": comm.estop_active,
                 "command_accepted": accepted,
@@ -598,6 +600,7 @@ async def websocket_control(websocket: WebSocket):
                 "tx_packets": stats["tx_packets"],
                 "rx_packets": stats["rx_packets"],
                 "telemetry": parsed_telem,
+                "pose": latest_pose.to_dict() if latest_pose is not None else None,
             })
 
     except WebSocketDisconnect:
