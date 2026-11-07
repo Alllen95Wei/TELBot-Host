@@ -295,6 +295,16 @@ class RobotHost:
 
         while not self._restart_requested:
             if self._uvicorn_server is not None and self._uvicorn_server.should_exit:
+                # Force close lingering long-lived streaming connections (e.g. MJPEG proxy, WebSockets)
+                # so Uvicorn does not hang waiting for connections to close on Python 3.12+ wait_closed().
+                await asyncio.sleep(0.08)
+                if hasattr(self._uvicorn_server, "server_state"):
+                    for conn in list(self._uvicorn_server.server_state.connections):
+                        try:
+                            if hasattr(conn, "transport") and conn.transport:
+                                conn.transport.close()
+                        except Exception:
+                            pass
                 break
 
             now = time.monotonic()
@@ -348,6 +358,7 @@ class RobotHost:
             log_config=None,
             ssl_certfile=self.ssl_certfile if use_ssl else None,
             ssl_keyfile=self.ssl_keyfile if use_ssl else None,
+            timeout_graceful_shutdown=1,
         )
         self._uvicorn_server = uvicorn.Server(uv_config)
 
