@@ -169,6 +169,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   initMappingUI();
   initVideoControls();
   initControlSwitches();
+  initFieldPoseMap();
   initWebSocket();
   initStatusPolling();
   await initWebHID();
@@ -850,6 +851,9 @@ function updateStatusFromWs(msg) {
     document.getElementById("battery-text").textContent =
       `${msg.telemetry.battery_v.toFixed(2)} V`;
   }
+  if (msg.pose) {
+    updatePoseUI(msg.pose);
+  }
 }
 
 function initStatusPolling() {
@@ -866,6 +870,9 @@ function initStatusPolling() {
         if (data.latest_telemetry && typeof data.latest_telemetry.battery_v === "number") {
           document.getElementById("battery-text").textContent =
             `${data.latest_telemetry.battery_v.toFixed(2)} V`;
+        }
+        if (data.pose) {
+          updatePoseUI(data.pose);
         }
       }
     } catch (e) {
@@ -904,4 +911,381 @@ function initStatusPolling() {
   poll();
   setInterval(poll, 1500);
 }
+
+// ============================================================================
+// Live 2D Field Pose Map (400 cm x 500 cm, Origin at Bottom-Left)
+// ============================================================================
+const FIELD_WIDTH_CM = 400.0;
+const FIELD_LENGTH_CM = 500.0;
+const poseTrail = []; // Recent (x_cm, y_cm) history
+let currentPoseState = null;
+
+function initFieldPoseMap() {
+  const canvas = document.getElementById("field-map-canvas");
+  if (!canvas) return;
+
+  // Bind Zero Heading & Reset History buttons
+  document.getElementById("pose-zero-heading-btn").addEventListener("click", async () => {
+    try {
+      await fetch("/api/pose/calibrate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ target_field_deg: 0.0, reset_history: false }),
+      });
+    } catch (e) {
+      console.error("Failed to calibrate heading:", e);
+    }
+  });
+
+  document.getElementById("pose-reset-btn").addEventListener("click", async () => {
+    poseTrail.length = 0;
+    currentPoseState = null;
+    drawFieldMap(null);
+    try {
+      await fetch("/api/pose/calibrate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reset_history: true }),
+      });
+    } catch (e) {
+      console.error("Failed to reset pose history:", e);
+    }
+  });
+
+  // Bind Simulator Sliders
+  const fSlider = document.getElementById("sim-f-slider");
+  const lSlider = document.getElementById("sim-l-slider");
+  const rSlider = document.getElementById("sim-r-slider");
+  const hSlider = document.getElementById("sim-h-slider");
+
+  const updateSimLabels = () => {
+    document.getElementById("sim-f-label").textContent = `${fSlider.value} cm`;
+    document.getElementById("sim-l-label").textContent = `${lSlider.value} cm`;
+    document.getElementById("sim-r-label").textContent = `${rSlider.value} cm`;
+    document.getElementById("sim-h-label").textContent = `${hSlider.value}\u00B0`;
+  };
+
+  const sendSimPose = async (f, l, r, h) => {
+    try {
+      const res = await fetch("/api/pose/update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          dist_front_cm: Number(f),
+          dist_left_cm: Number(l),
+          dist_right_cm: Number(r),
+          raw_heading_deg: Number(h),
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.pose) updatePoseUI(data.pose);
+      }
+    } catch (e) {
+      console.error("Simulator update error:", e);
+    }
+  };
+
+  for (const s of [fSlider, lSlider, rSlider, hSlider]) {
+    s.addEventListener("input", () => {
+      updateSimLabels();
+      sendSimPose(fSlider.value, lSlider.value, rSlider.value, hSlider.value);
+    });
+  }
+
+  document.getElementById("sim-send-btn").addEventListener("click", () => {
+    sendSimPose(fSlider.value, lSlider.value, rSlider.value, hSlider.value);
+  });
+
+  document.getElementById("sim-obstacle-r-btn").addEventListener("click", () => {
+    rSlider.value = 45;
+    updateSimLabels();
+    sendSimPose(fSlider.value, lSlider.value, 45, hSlider.value);
+  });
+
+  document.getElementById("sim-obstacle-l-btn").addEventListener("click", () => {
+    lSlider.value = 45;
+    updateSimLabels();
+    sendSimPose(fSlider.value, 45, rSlider.value, hSlider.value);
+  });
+
+  // Clicking on the 2D field canvas places the simulated robot at that (X, Y)
+  canvas.addEventListener("click", (evt) => {
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const px = (evt.clientX - rect.left) * scaleX;
+    const py = (evt.clientY - rect.top) * scaleY;
+
+    const padL = 34;
+    const padR = 18;
+    const padT = 30;
+    const padB = 28;
+    const fieldW = canvas.width - padL - padR;
+    const fieldH = canvas.height - padT - padB;
+
+    const xCm = Math.round(Math.max(10, Math.min(390, ((px - padL) / fieldW) * FIELD_WIDTH_CM)));
+    const yCm = Math.round(Math.max(10, Math.min(490, (1 - (py - padT) / fieldH) * FIELD_LENGTH_CM)));
+
+    fSlider.value = Math.round(FIELD_LENGTH_CM - yCm);
+    lSlider.value = xCm;
+    rSlider.value = Math.round(FIELD_WIDTH_CM - xCm);
+    hSlider.value = 0;
+    updateSimLabels();
+    sendSimPose(fSlider.value, lSlider.value, rSlider.value, 0);
+  });
+
+  drawFieldMap(null);
+}
+
+function updatePoseUI(pose) {
+  currentPoseState = pose;
+
+  const xText = typeof pose.x_cm === "number" ? `${pose.x_cm.toFixed(1)} cm` : "---.- cm";
+  const yText = typeof pose.y_cm === "number" ? `${pose.y_cm.toFixed(1)} cm` : "---.- cm";
+  const hText = typeof pose.heading_deg === "number" ? `${pose.heading_deg.toFixed(1)}\u00B0` : "---.-\u00B0";
+
+  document.getElementById("pose-x-val").textContent = xText;
+  document.getElementById("pose-y-val").textContent = yText;
+  document.getElementById("pose-heading-val").textContent = hText;
+
+  document.getElementById("lidar-front-val").textContent =
+    typeof pose.dist_front_cm === "number" ? `${pose.dist_front_cm.toFixed(0)} cm` : "--- cm";
+  document.getElementById("lidar-left-val").textContent =
+    typeof pose.dist_left_cm === "number" ? `${pose.dist_left_cm.toFixed(0)} cm` : "--- cm";
+  document.getElementById("lidar-right-val").textContent =
+    typeof pose.dist_right_cm === "number" ? `${pose.dist_right_cm.toFixed(0)} cm` : "--- cm";
+
+  const validL = typeof pose.last_valid_left_cm === "number" ? `${pose.last_valid_left_cm.toFixed(0)}` : "---";
+  const validR = typeof pose.last_valid_right_cm === "number" ? `${pose.last_valid_right_cm.toFixed(0)}` : "---";
+  document.getElementById("pose-validation-detail").textContent =
+    `L/R: ${pose.lr_status} | Front: ${pose.front_status} | Cached L=${validL}cm, R=${validR}cm`;
+
+  const statusChip = document.getElementById("pose-status-chip");
+  const statusText = document.getElementById("pose-status-text");
+  const isRejected =
+    pose.lr_status.includes("rejected") || pose.front_status.includes("rejected");
+
+  statusChip.classList.toggle("primary", Boolean(pose.valid && !isRejected));
+  statusChip.classList.toggle("error", Boolean(isRejected));
+
+  if (pose.lr_status === "left_only_rejected_right") {
+    statusText.textContent = "Obstacle on Right (Using L)";
+  } else if (pose.lr_status === "right_only_rejected_left") {
+    statusText.textContent = "Obstacle on Left (Using R)";
+  } else if (pose.valid) {
+    statusText.textContent = "Pose Locked";
+  } else {
+    statusText.textContent = "Partial / Uncalibrated";
+  }
+
+  if (typeof pose.x_cm === "number" && typeof pose.y_cm === "number") {
+    const prev = poseTrail[poseTrail.length - 1];
+    if (!prev || Math.hypot(pose.x_cm - prev.x, pose.y_cm - prev.y) >= 1.5) {
+      poseTrail.push({ x: pose.x_cm, y: pose.y_cm });
+      if (poseTrail.length > 45) poseTrail.shift();
+    }
+  }
+
+  drawFieldMap(pose);
+}
+
+function drawFieldMap(pose) {
+  const canvas = document.getElementById("field-map-canvas");
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+
+  const W = canvas.width;
+  const H = canvas.height;
+  const padL = 34;
+  const padR = 18;
+  const padT = 30;
+  const padB = 28;
+  const fieldW = W - padL - padR;
+  const fieldH = H - padT - padB;
+
+  const toPxX = (xCm) => padL + (xCm / FIELD_WIDTH_CM) * fieldW;
+  const toPxY = (yCm) => padT + ((FIELD_LENGTH_CM - yCm) / FIELD_LENGTH_CM) * fieldH;
+
+  ctx.clearRect(0, 0, W, H);
+
+  // 1. Field surface background
+  ctx.fillStyle = "#111827";
+  ctx.fillRect(padL, padT, fieldW, fieldH);
+
+  // 2. Grid lines (every 50 cm, major every 100 cm)
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.font = "10px monospace";
+
+  for (let x = 0; x <= FIELD_WIDTH_CM; x += 50) {
+    const px = toPxX(x);
+    ctx.beginPath();
+    ctx.moveTo(px, padT);
+    ctx.lineTo(px, padT + fieldH);
+    ctx.strokeStyle = x % 100 === 0 ? "rgba(148, 163, 184, 0.25)" : "rgba(148, 163, 184, 0.1)";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    if (x % 100 === 0) {
+      ctx.fillStyle = "#94a3b8";
+      ctx.fillText(`${x}`, px, padT + fieldH + 14);
+    }
+  }
+
+  ctx.textAlign = "right";
+  for (let y = 0; y <= FIELD_LENGTH_CM; y += 50) {
+    const py = toPxY(y);
+    ctx.beginPath();
+    ctx.moveTo(padL, py);
+    ctx.lineTo(padL + fieldW, py);
+    ctx.strokeStyle = y % 100 === 0 ? "rgba(148, 163, 184, 0.25)" : "rgba(148, 163, 184, 0.1)";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    if (y % 100 === 0) {
+      ctx.fillStyle = "#94a3b8";
+      ctx.fillText(`${y}`, padL - 6, py);
+    }
+  }
+
+  // 3. Top Wall 3x3 Target Grid Banner (y = 500 cm)
+  const gridLeftX = toPxX(110);
+  const gridRightX = toPxX(290);
+  const gridW = gridRightX - gridLeftX;
+  ctx.fillStyle = "rgba(245, 158, 11, 0.22)";
+  ctx.fillRect(gridLeftX, padT - 18, gridW, 18);
+  ctx.strokeStyle = "#f59e0b";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(gridLeftX, padT - 18, gridW, 18);
+
+  // 3 columns inside the 3x3 target zone
+  for (let c = 1; c <= 2; c++) {
+    const cx = gridLeftX + (gridW * c) / 3;
+    ctx.beginPath();
+    ctx.moveTo(cx, padT - 18);
+    ctx.lineTo(cx, padT);
+    ctx.stroke();
+  }
+  ctx.fillStyle = "#fbbf24";
+  ctx.textAlign = "center";
+  ctx.font = "bold 10px monospace";
+  ctx.fillText("3x3 TARGET GRID (Y=500)", padL + fieldW / 2, padT - 9);
+
+  // 4. Outer Field Boundary Walls
+  ctx.strokeStyle = "#64748b";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(padL, padT, fieldW, fieldH);
+
+  // 5. Draw Breadcrumb Trail
+  if (poseTrail.length > 1) {
+    ctx.beginPath();
+    for (let i = 0; i < poseTrail.length; i++) {
+      const pt = poseTrail[i];
+      const tx = toPxX(pt.x);
+      const ty = toPxY(pt.y);
+      if (i === 0) ctx.moveTo(tx, ty);
+      else ctx.lineTo(tx, ty);
+    }
+    ctx.strokeStyle = "rgba(56, 189, 248, 0.45)";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+
+  if (!pose || typeof pose.x_cm !== "number" || typeof pose.y_cm !== "number") {
+    ctx.fillStyle = "rgba(226, 232, 240, 0.7)";
+    ctx.font = "12px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText("Click map or send sensor data", padL + fieldW / 2, padT + fieldH / 2);
+    return;
+  }
+
+  const rx = toPxX(pose.x_cm);
+  const ry = toPxY(pose.y_cm);
+  const headingRad = ((pose.heading_deg || 0) * Math.PI) / 180.0;
+
+  // 6. Draw 3 LiDAR Beams (Front=0, Left=-90, Right=+90)
+  const drawBeam = (distCm, relDeg, isRejected, label) => {
+    if (typeof distCm !== "number" || distCm <= 0) return;
+    const alphaRad = ((pose.heading_deg + relDeg) * Math.PI) / 180.0;
+    const endXCm = pose.x_cm + distCm * Math.sin(alphaRad);
+    const endYCm = pose.y_cm + distCm * Math.cos(alphaRad);
+    const ex = toPxX(endXCm);
+    const ey = toPxY(endYCm);
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(rx, ry);
+    ctx.lineTo(ex, ey);
+    if (isRejected) {
+      ctx.setLineDash([5, 4]);
+      ctx.strokeStyle = "#ff5252";
+      ctx.lineWidth = 2;
+    } else {
+      ctx.strokeStyle = "rgba(0, 230, 118, 0.85)";
+      ctx.lineWidth = 1.8;
+    }
+    ctx.stroke();
+
+    // Hit point marker
+    ctx.beginPath();
+    ctx.arc(ex, ey, 4, 0, Math.PI * 2);
+    ctx.fillStyle = isRejected ? "#ff5252" : "#00e676";
+    ctx.fill();
+
+    if (isRejected) {
+      ctx.fillStyle = "#ff8a80";
+      ctx.font = "bold 9px monospace";
+      ctx.textAlign = "center";
+      ctx.fillText(`OBS (${label})`, ex, ey - 8);
+    }
+    ctx.restore();
+  };
+
+  const rejectLeft =
+    pose.lr_status === "right_only_rejected_left" || pose.lr_status === "left_rejected_delta";
+  const rejectRight =
+    pose.lr_status === "left_only_rejected_right" || pose.lr_status === "right_rejected_delta";
+  const rejectFront = pose.front_status === "rejected_delta";
+
+  drawBeam(pose.dist_left_cm, -90.0, rejectLeft, "L");
+  drawBeam(pose.dist_right_cm, 90.0, rejectRight, "R");
+  drawBeam(pose.dist_front_cm, 0.0, rejectFront, "F");
+
+  // 7. Draw Robot Chassis & Heading Arrow
+  ctx.save();
+  ctx.translate(rx, ry);
+  ctx.rotate(headingRad);
+
+  // Robot square chassis (~36x36 cm scaled)
+  const halfBox = (18 / FIELD_WIDTH_CM) * fieldW;
+  ctx.fillStyle = "rgba(56, 189, 248, 0.28)";
+  ctx.strokeStyle = "#38bdf8";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.roundRect(-halfBox, -halfBox, halfBox * 2, halfBox * 2, 4);
+  ctx.fill();
+  ctx.stroke();
+
+  // Heading arrow pointing toward robot Front (0 deg = Up)
+  ctx.beginPath();
+  ctx.moveTo(0, -halfBox - 8);
+  ctx.lineTo(-6, -4);
+  ctx.lineTo(6, -4);
+  ctx.closePath();
+  ctx.fillStyle = "#38bdf8";
+  ctx.fill();
+  ctx.restore();
+
+  // Coordinate label next to robot
+  ctx.fillStyle = "#f8fafc";
+  ctx.font = "bold 10px monospace";
+  ctx.textAlign = "left";
+  ctx.fillText(
+    `(${pose.x_cm.toFixed(0)}, ${pose.y_cm.toFixed(0)})`,
+    Math.min(rx + 14, padL + fieldW - 62),
+    Math.max(ry - 12, padT + 12)
+  );
+}
+
 

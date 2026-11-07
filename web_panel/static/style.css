@@ -12,7 +12,7 @@ body {
 }
 
 .mono {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-family: monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New";
 }
 
 /* Top bar & E-Stop Alert Banner */
@@ -251,4 +251,32 @@ table.report-table td {
 .mapping-row:last-child {
   border-bottom: none;
 }
+
+/* 2D Field Pose Map Canvas */
+.field-map-wrap {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background: #0b0f17;
+  border-radius: 14px;
+  border: 1px solid var(--outline-variant);
+  padding: 10px;
+}
+
+#field-map-canvas {
+  width: 100%;
+  max-width: 340px;
+  aspect-ratio: 4 / 5;
+  display: block;
+  cursor: crosshair;
+}
+
+.legend-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-right: 4px;
+}
+
 
