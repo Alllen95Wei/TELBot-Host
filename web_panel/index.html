@@ -431,6 +431,7 @@
                 <span><span class="legend-dot" style="background: #00e676;"></span>Valid Ray</span>
                 <span><span class="legend-dot" style="background: #ff5252;"></span>Rejected (Obstacle)</span>
                 <span><span class="legend-dot" style="background: #38bdf8;"></span>Robot Pose</span>
+                <span><span class="legend-dot" style="background: #facc15;"></span>Active 1x3 Goal</span>
               </div>
             </div>
 
@@ -523,6 +524,27 @@
                   <button class="button small border round" id="sim-obstacle-l-btn" title="Simulate an obstacle suddenly blocking Left LiDAR at 45 cm">
                     <i>block</i>
                     <span>Test Left Obstacle</span>
+                  </button>
+                </div>
+
+                <div class="small-space"></div>
+                <div class="small-text bold" style="margin-bottom: 4px;">Vision 1x3 Active Goal Target (YOLO Simulator)</div>
+                <div class="row wrap" style="gap: 6px;">
+                  <button class="button small border round" id="sim-target-left-btn" title="Simulate YOLO detecting Left column active">
+                    <i>flag</i>
+                    <span>Left (140 cm)</span>
+                  </button>
+                  <button class="button small border round" id="sim-target-center-btn" title="Simulate YOLO detecting Center column active">
+                    <i>flag</i>
+                    <span>Center (200 cm)</span>
+                  </button>
+                  <button class="button small border round" id="sim-target-right-btn" title="Simulate YOLO detecting Right column active">
+                    <i>flag</i>
+                    <span>Right (260 cm)</span>
+                  </button>
+                  <button class="button small border round" id="sim-target-reset-btn" title="Reset vision active target">
+                    <i>clear</i>
+                    <span>Clear Goal</span>
                   </button>
                 </div>
               </details>

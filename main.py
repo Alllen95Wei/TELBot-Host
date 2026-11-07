@@ -17,8 +17,14 @@ from config import EStop as EStopConfig
 from config import Safety as SafetyConfig
 from config import Server as ServerConfig
 from config import UART as UARTConfig
-from core import CmdType, MatchManager, Packet, PartType, PoseEstimator, UARTComm
-from web_panel.server import app, set_match_manager, set_pose_estimator, set_uart_comm
+from core import CmdType, MatchManager, Packet, PartType, PoseEstimator, UARTComm, VisionManager
+from web_panel.server import (
+    app,
+    set_match_manager,
+    set_pose_estimator,
+    set_uart_comm,
+    set_vision_manager,
+)
 
 logger = logging.getLogger("TELBot.Main")
 
@@ -215,6 +221,7 @@ class RobotHost:
         self.last_ack_time: float = 0.0
         self.pose_estimator = PoseEstimator()
         self.match_manager = MatchManager(on_stop_required=lambda: self.uart.send_stop())
+        self.vision_manager = VisionManager()
 
         self.estop = EStopMonitor(
             chip_path=EStopConfig.CHIP,
@@ -368,6 +375,7 @@ class RobotHost:
             set_uart_comm(self.uart)
             set_pose_estimator(self.pose_estimator)
             set_match_manager(self.match_manager)
+            set_vision_manager(self.vision_manager)
 
             # 2. Start physical E-Stop interrupt listener
             self.estop.start()

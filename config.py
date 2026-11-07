@@ -74,3 +74,22 @@ class Match:
     LOCK_CONTROLLER_IN_AUTO = True
     REQUIRE_MANUAL_TELEOP_START = True  # After auto, operator must explicitly enable Tele-Op
     AUTO_SWITCH_MODE = False
+
+
+class SpecialGrid:
+    """Special 1x3 goal row along the top wall (Y = 500 cm) active during Autonomous."""
+    COLUMN_SPACING_CM = 60.0    # Gap between columns
+    CENTER_X_CM = 200.0         # Center column X coordinate
+    TOP_Y_CM = 500.0            # Top wall Y coordinate
+    GRID_WIDTH_CM = 45.0        # Physical width of each goal
+    GRID_HEIGHT_CM = 35.0       # Physical height of each goal
+
+    TARGET_COORDS = {
+        "left": (CENTER_X_CM - COLUMN_SPACING_CM, TOP_Y_CM),    # (140.0, 500.0)
+        "center": (CENTER_X_CM, TOP_Y_CM),                     # (200.0, 500.0)
+        "right": (CENTER_X_CM + COLUMN_SPACING_CM, TOP_Y_CM),   # (260.0, 500.0)
+    }
+
+    @classmethod
+    def get_coords(cls, target: str) -> tuple[float, float] | None:
+        return cls.TARGET_COORDS.get(str(target).lower().strip())

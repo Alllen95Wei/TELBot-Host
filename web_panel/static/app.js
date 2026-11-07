@@ -866,6 +866,9 @@ function updateStatusFromWs(msg) {
   if (msg.match) {
     updateMatchUI(msg.match);
   }
+  if (msg.vision) {
+    updateVisionUI(msg.vision);
+  }
   if (msg.pose) {
     updatePoseUI(msg.pose);
   }
@@ -888,6 +891,9 @@ function initStatusPolling() {
         }
         if (data.match) {
           updateMatchUI(data.match);
+        }
+        if (data.vision) {
+          updateVisionUI(data.vision);
         }
         if (data.pose) {
           updatePoseUI(data.pose);
@@ -1090,6 +1096,41 @@ function initMatchControls() {
 }
 
 // ============================================================================
+// Vision Target Tracking & Latching (Special 1x3 Grid Row)
+// ============================================================================
+let currentVisionState = {
+  active_target: "none",
+  target_detected: false,
+  latched: false,
+  timestamp: 0,
+  target_coords: null,
+};
+
+function updateVisionUI(vision) {
+  if (!vision) return;
+  currentVisionState = { ...currentVisionState, ...vision };
+
+  const chip = document.getElementById("vision-target-chip");
+  const icon = document.getElementById("vision-target-icon");
+
+  if (chip && icon && text) {
+    chip.classList.remove("vision-chip-active", "vision-chip-searching");
+    if (currentVisionState.latched && currentVisionState.active_target !== "none") {
+      chip.classList.add("vision-chip-active");
+      icon.textContent = "verified";
+    } else {
+      chip.classList.add("vision-chip-searching");
+      icon.textContent = "center_focus_weak";
+    }
+  }
+
+  // Redraw field map to reflect target highlighting
+  if (typeof drawFieldMap === "function") {
+    drawFieldMap(currentPoseState);
+  }
+}
+
+// ============================================================================
 // Live 2D Field Pose Map (400 cm x 500 cm, Origin at Bottom-Left)
 // ============================================================================
 const FIELD_WIDTH_CM = 400.0;
@@ -1185,6 +1226,49 @@ function initFieldPoseMap() {
     updateSimLabels();
     sendSimPose(fSlider.value, 45, rSlider.value, hSlider.value);
   });
+
+  // Vision 1x3 active goal simulator buttons
+  const sendSimVision = async (target, detected) => {
+    try {
+      const res = await fetch("/api/vision/target", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          active_target: target,
+          target_detected: detected,
+          timestamp: Date.now() / 1000,
+          force: true,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.vision) updateVisionUI(data.vision);
+      }
+    } catch (e) {
+      console.error("Failed to send sim vision:", e);
+    }
+  };
+
+  const simTargetLeftBtn = document.getElementById("sim-target-left-btn");
+  if (simTargetLeftBtn) simTargetLeftBtn.addEventListener("click", () => sendSimVision("left", true));
+  const simTargetCenterBtn = document.getElementById("sim-target-center-btn");
+  if (simTargetCenterBtn) simTargetCenterBtn.addEventListener("click", () => sendSimVision("center", true));
+  const simTargetRightBtn = document.getElementById("sim-target-right-btn");
+  if (simTargetRightBtn) simTargetRightBtn.addEventListener("click", () => sendSimVision("right", true));
+  const simTargetResetBtn = document.getElementById("sim-target-reset-btn");
+  if (simTargetResetBtn) {
+    simTargetResetBtn.addEventListener("click", async () => {
+      try {
+        const res = await fetch("/api/vision/reset", { method: "POST" });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.vision) updateVisionUI(data.vision);
+        }
+      } catch (e) {
+        console.error("Failed to reset sim vision:", e);
+      }
+    });
+  }
 
   // Clicking on the 2D field canvas places the simulated robot at that (X, Y)
   canvas.addEventListener("click", (evt) => {
@@ -1348,6 +1432,52 @@ function drawFieldMap(pose) {
   ctx.textAlign = "center";
   ctx.font = "bold 10px monospace";
   ctx.fillText("3x3 TARGET GRID (Y=500)", padL + fieldW / 2, padT - 9);
+
+  // 3b. Special 1x3 Grid Row (y = 500 cm, 60 cm column spacing)
+  const specialCols = [
+    { key: "left", xCm: 140.0, label: "L (140)" },
+    { key: "center", xCm: 200.0, label: "C (200)" },
+    { key: "right", xCm: 260.0, label: "R (260)" },
+  ];
+  const colBoxWCm = 44.0;
+  const colBoxHCm = 26.0;
+  const halfWCmPx = (colBoxWCm / 2 / FIELD_WIDTH_CM) * fieldW;
+  const colHPx = (colBoxHCm / FIELD_LENGTH_CM) * fieldH;
+
+  for (const sc of specialCols) {
+    const scx = toPxX(sc.xCm);
+    const scy = padT;
+    const isActive =
+      currentVisionState.latched &&
+      currentVisionState.active_target.toLowerCase() === sc.key;
+
+    ctx.save();
+    if (isActive) {
+      // Glowing highlight for active 4-point goal
+      ctx.fillStyle = "rgba(250, 204, 21, 0.4)";
+      ctx.fillRect(scx - halfWCmPx, scy, halfWCmPx * 2, colHPx);
+      ctx.strokeStyle = "#facc15";
+      ctx.lineWidth = 2.5;
+      ctx.strokeRect(scx - halfWCmPx, scy, halfWCmPx * 2, colHPx);
+
+      ctx.fillStyle = "#facc15";
+      ctx.font = "bold 9px monospace";
+      ctx.textAlign = "center";
+      ctx.fillText("4 PTS*", scx, scy + colHPx / 2 + 1);
+    } else {
+      ctx.fillStyle = "rgba(148, 163, 184, 0.08)";
+      ctx.fillRect(scx - halfWCmPx, scy, halfWCmPx * 2, colHPx);
+      ctx.strokeStyle = "rgba(148, 163, 184, 0.35)";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(scx - halfWCmPx, scy, halfWCmPx * 2, colHPx);
+
+      ctx.fillStyle = "rgba(148, 163, 184, 0.6)";
+      ctx.font = "8px monospace";
+      ctx.textAlign = "center";
+      ctx.fillText(sc.label, scx, scy + colHPx / 2 + 1);
+    }
+    ctx.restore();
+  }
 
   // 4. Outer Field Boundary Walls
   ctx.strokeStyle = "#64748b";

@@ -371,5 +371,19 @@ table.report-table td {
   100% { opacity: 1; }
 }
 
+/* Active 1x3 Vision Target Status */
+.vision-chip-active {
+  background: #facc15 !important;
+  color: #000 !important;
+  border: 1px solid #eab308 !important;
+  font-weight: 700;
+  box-shadow: 0 0 10px rgba(250, 204, 21, 0.6);
+}
+
+.vision-chip-searching {
+  border: 1px dashed var(--outline);
+}
+
+
 
 

@@ -22,8 +22,9 @@ sys.path.append(str(ROOT_DIR))
 from config import Camera as CameraConfig
 from config import Field as FieldConfig
 from config import Server as ServerConfig
+from config import SpecialGrid as SpecialGridConfig
 from config import UART as UARTConfig
-from core import MatchManager, MatchMode, PartType, PoseEstimator, UARTComm
+from core import MatchManager, MatchMode, PartType, PoseEstimator, UARTComm, VisionManager, VisionTarget
 
 logger = logging.getLogger("TELBot.Server")
 
@@ -37,6 +38,7 @@ uart = UARTComm(
 )
 pose_estimator = PoseEstimator()
 match_manager = MatchManager(on_stop_required=lambda: uart.send_stop())
+vision_manager = VisionManager()
 
 
 def set_uart_comm(comm: UARTComm) -> None:
@@ -74,6 +76,18 @@ def set_match_manager(manager: MatchManager) -> None:
 def get_match_manager() -> MatchManager:
     """Returns the active MatchManager instance."""
     return getattr(app.state, "match_manager", match_manager)
+
+
+def set_vision_manager(manager: VisionManager) -> None:
+    """Injects an externally managed VisionManager instance (used by main.py)."""
+    global vision_manager
+    vision_manager = manager
+    app.state.vision_manager = manager
+
+
+def get_vision_manager() -> VisionManager:
+    """Returns the active VisionManager instance."""
+    return getattr(app.state, "vision_manager", vision_manager)
 
 
 # Active video streaming proxy writers to cleanly tear down on shutdown
@@ -235,15 +249,23 @@ class PoseCalibrateRequest(BaseModel):
     )
 
 
+class VisionTargetRequest(BaseModel):
+    timestamp: float = Field(default=0.0, description="Detector timestamp")
+    active_target: str = Field(..., description="Active column: 'left', 'center', 'right', or 'none'")
+    target_detected: bool = Field(default=False, description="Whether target is detected")
+    force: bool = Field(default=False, description="Force override an already latched target")
+
+
 # ==============================================================================
 # REST API Endpoints
 # ==============================================================================
 @app.get("/api/status")
 def get_status():
-    """Retrieve communication statistics, E-Stop state, queue depth, match state, pose, and latest telemetry."""
+    """Retrieve communication statistics, E-Stop state, queue depth, match state, vision target, pose, and latest telemetry."""
     comm = get_uart_comm()
     estimator = get_pose_estimator()
     match_mgr = get_match_manager()
+    vision_mgr = get_vision_manager()
     stats = comm.get_stats()
     telemetry = comm.latest_telemetry
     parsed_telem = None
@@ -261,6 +283,7 @@ def get_status():
         "estop_active": comm.estop_active,
         "stats": stats,
         "match": match_mgr.get_status(),
+        "vision": vision_mgr.get_status(),
         "latest_telemetry": parsed_telem,
         "pose": latest_pose.to_dict() if latest_pose is not None else None,
     }
@@ -277,7 +300,8 @@ def get_match_status():
 
 @app.post("/api/match/auto/start")
 def start_auto_phase():
-    """Starts the 1:00 Autonomous phase (locks controller input)."""
+    """Starts the 1:00 Autonomous phase (locks controller input) and unlatches vision target."""
+    get_vision_manager().reset()
     return get_match_manager().start_auto()
 
 
@@ -304,8 +328,40 @@ def disarm_robot():
 
 @app.post("/api/match/reset")
 def reset_match_phase():
-    """Resets match timers and returns robot to DISARMED state."""
+    """Resets match timers, unlatches vision target, and returns robot to DISARMED state."""
+    get_vision_manager().reset()
     return get_match_manager().reset_match()
+
+
+# ==============================================================================
+# Vision Target Endpoints (1x3 Special Row Detection from Laptop YOLO)
+# ==============================================================================
+@app.get("/api/vision/target")
+def get_vision_target():
+    """Returns the active 1x3 target column ('left', 'center', 'right', 'none') and field coordinates."""
+    return get_vision_manager().get_status()
+
+
+@app.post("/api/vision/target")
+def update_vision_target(req: VisionTargetRequest):
+    """
+    Receives YOLO detection from operator's laptop.
+    Once detected with target_detected=True, latches the target until Auto ends or match reset.
+    """
+    target = get_vision_manager().update(
+        active_target=req.active_target,
+        target_detected=req.target_detected,
+        timestamp=req.timestamp,
+        force=req.force,
+    )
+    return {"status": "ok", "vision": target.to_dict()}
+
+
+@app.post("/api/vision/reset")
+def reset_vision_target():
+    """Manually resets the latched vision target back to NONE."""
+    target = get_vision_manager().reset()
+    return {"status": "reset", "vision": target.to_dict()}
 
 
 @app.get("/api/pose")
@@ -672,6 +728,18 @@ async def websocket_control(websocket: WebSocket):
                 part_val = int(data.get("part", PartType.ALL.value))
                 comm.send_stop(part=PartType(part_val))
 
+            elif msg_type == "vision":
+                active_target = str(data.get("active_target", "none"))
+                target_detected = bool(data.get("target_detected", False))
+                ts = float(data.get("timestamp", 0.0))
+                force = bool(data.get("force", False))
+                get_vision_manager().update(
+                    active_target=active_target,
+                    target_detected=target_detected,
+                    timestamp=ts,
+                    force=force,
+                )
+
             # Read latest stats, pose & telemetry snapshot to send back to client
             stats = comm.get_stats()
             telem = comm.latest_telemetry
@@ -691,6 +759,7 @@ async def websocket_control(websocket: WebSocket):
                 "tx_packets": stats["tx_packets"],
                 "rx_packets": stats["rx_packets"],
                 "match": match_mgr.get_status(),
+                "vision": get_vision_manager().get_status(),
                 "telemetry": parsed_telem,
                 "pose": latest_pose.to_dict() if latest_pose is not None else None,
             })
