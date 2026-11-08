@@ -16,51 +16,96 @@ A game is consisted of 2 phases:
 2. Tele-Op (2:00)
 During Auto, the robot shall not receive any commands from remote controllers.
 After that, drivers take the control until the end.
+When Auto expires, the robot immediately stops all motors and enters `AUTO_WAIT`; operator manually enables Tele-Op from the Web UI.
 
-## Planned control framework
-Currently, this project has implemented a complete framework for human to send control commands to RPi Pico W "slave" via UART and network; Pico will control the motors based on received UART packets.
-For special row, it requires vision processing to detect which one is "active"; but processing would be done by operator's laptop.
+## Field Dimensions & Coordinates
+- **Field Size**: `500 cm` (Top to Bottom, Y-axis) $\times$ `400 cm` (Left to Right, X-axis).
+- **Coordinate System**: Origin $(0, 0)$ is at the bottom-left corner; the target 3x3 grid and special 1x3 grid are along the top wall ($y = 500\text{ cm}$, $0^\circ$ heading faces Top wall, $90^\circ$ faces Right wall).
+- **Special 1x3 Grid Coordinates**: `left` $(140, 500)$, `center` $(200, 500)$, `right` $(260, 500)$.
 
-# Next steps
-We still need additional work on:
-- Ability to receive sensor data: our sensors are all attached on an ESP32, which is not planned in the previous progress.
-- Pose estimation: Since the robot must be operated in auto for the first minute, it must be able to calculate its current pose on field based on the following data:
-  - 3 distance sensors on robot (it's a Lidar, but it only picks 3 directions: front, left, and right)
-  - geomagnetic direction
-- Mode switching: As mentioned, we haven't designed an auto mode. It shall be able to:
-  - executes a fixed process defined via a script or web UI
-  - be enabled via web UI
-- "Active" field data receiving: Operator's laptop will deploy YOLO and process video stream from RPi, then send back the following data:
-```json
-{
-  "timestamp": 0,
-  "active_target": "left/center/right/none",
-  "target_detected": false,
-}
-```
+## Current Architecture
+- **Host (RPi 5)**: Runs the FastAPI web server, WebSockets, pose estimation (`PoseEstimator` with delta-based obstacle rejection), vision target tracking/latching (`VisionManager`), match state machine (`MatchManager`), and UART master (`UARTComm`).
+- **Slave (RPi Pico W)**: MicroPython firmware managing low-level motor actuation (Mecanum chassis via `IBT_2`, conveyor trigger via `SparkMAX`, feeder spinner via `GeneralPWM`, dual flywheels via `SparkMAX`, and pitch adjustment via `TB6560` stepper driver).
+- **Vision Processing**: Operator's laptop deploys YOLO to detect the active 1x3 target and posts JSON results to `/api/vision/target`, where it latches for the remainder of Auto.
 
-# Undetermined Questions / Design Decisions
+---
 
-## 1. ESP32 Interface & Protocol
-- **Physical Connection**: Will ESP32 connect via USB serial (`/dev/ttyUSB0` or `/dev/ttyACM0`) or RPi 5 secondary GPIO UART (`/dev/ttyAMA1`)?
-- **Wire Protocol**: 
-  - Standard binary framed packet (matching Pico W: `[0xAA, 0x55][LEN][SEQ][CMD=TELEMETRY][PART=SENSORS][PAYLOAD][CRC8]` packed as `<HHHh`)?
-  - Or newline-delimited text (`JSON` or `CSV`, e.g. `{"f": 1200, "l": 800, "r": 850, "h": 45.2}\n`)?
-- **Streaming Rate & Baud Rate**: What baud rate (e.g. 115200) and publish frequency (e.g. 20 Hz, 50 Hz, 100 Hz)?
+# Undone Tasks
+
+1. **PID Controllers**:
+   - Closed-loop Chassis Pose-to-Point PID for autonomous navigation.
+   - Closed-loop Dual Flywheel RPM PID with automatic distance-to-RPM calculation and manual fallback.
+2. **ESP32 Sensor Interface & Telemetry**:
+   - Read 3 directional LiDARs, geomagnetic heading, and upper/lower flywheel RPM sensors from ESP32 into RPi 5 Host (to be designed and implemented after PID control).
+3. **Autonomous Routine Storage & Workflow**:
+   - Sequence runner executing fixed steps during the 1:00 Auto phase (e.g. drive to point $\to$ align $\to$ spin up flywheels $\to$ feed balls).
+
+---
+
+# PID Controller Implementation Plan
+
+## 1. Reusable PID Core (`core/pid.py`)
+- Generic `PIDController` class supporting position and velocity control with feedforward:
+  $$u(t) = K_v \cdot r(t) + K_s \cdot \operatorname{sgn}(r(t)) + K_p \cdot e(t) + K_i \int e(\tau)\,d\tau - K_d \frac{dy(t)}{dt}$$
+- **Safeguards**:
+  - Derivative-on-measurement to prevent setpoint change kicks.
+  - Output clamping `[out_min, out_max]` (specifically `out_min = 0` for flywheels to prevent any negative output).
+  - Anti-windup via integral clamping, `i_zone`, and integrator freeze on saturation.
+  - Continuous angle wrapping for heading control across $0^\circ / 360^\circ$ boundary.
+  - Immediate `reset()` when target is 0 or subsystem is stopped.
+
+## 2. Chassis Pose-to-Point PID (`ChassisPoseController` in `core/control.py`)
+- **Inputs**: Current field pose $(x_{\text{cm}}, y_{\text{cm}}, \theta_{\text{deg}})$ from `PoseEstimator.latest_pose`.
+- **Target**: `(target_x_cm, target_y_cm, target_heading_deg)`.
+- **3 Independent Axes**:
+  - $X$-axis PID: $e_x = x_{\text{target}} - x_{\text{cm}} \to u_X$
+  - $Y$-axis PID: $e_y = y_{\text{target}} - y_{\text{cm}} \to u_Y$
+  - Heading PID: wrapped angular error $e_\theta \to \omega$
+- **Coordinate Transformation**: Rotate field velocities $(u_X, u_Y)$ into robot body frame ($v_x$ forward, $v_y$ strafe) matching $0^\circ = +Y$, $90^\circ = +X$:
+  $$v_x = u_Y \cos\theta + u_X \sin\theta, \qquad v_y = u_X \cos\theta - u_Y \sin\theta$$
+- **Safety**: Auto-zero output on stale/invalid pose; `is_at_target()` check with configurable tolerances.
+
+## 3. Dual Flywheel RPM PID + Distance Auto-Speed (`ShooterSpeedController` in `core/control.py`)
+- **Shared Target**: Operator and auto-distance logic produce **one shared setpoint** ($0 \sim 5500$ RPM).
+- **Dual Independent Regulation**: Two independent PID instances (`upper_pid`, `lower_pid`) regulate upper and lower flywheels separately against the shared target to compensate for physical motor/ESC differences:
+  - Outputs clamped to $[0, 1000]$ (no negative output / reverse braking).
+  - Target 0 immediately returns $(0, 0)$ and resets integrators.
+- **Distance-Based Auto-Speed**:
+  - Computes Euclidean distance $d$ from robot pose to target grid along the top wall ($y = 500\text{ cm}$).
+  - Evaluates configurable piecewise-linear interpolation table in `config.py` to set target RPM.
+  - Operates in **Auto (Distance)** mode by default; operator adjusting manual slider or Cross Pad D-pad switches to **Manual Override**.
+- **Pre-ESP32 Sensor Fallback**:
+  - When ESP32 live RPM telemetry is present: full closed-loop PID.
+  - Before ESP32 is integrated or when RPM data is stale: open-loop feedforward fallback ($\text{cmd} = \text{round}(1000 \times \text{target\_rpm} / 5500)$) to prevent integral windup against missing feedback.
+
+## 4. Protocol & Slave Firmware Updates
+- **UART Framing (`PART_SHOOTER`)**:
+  - Full shooter packet: 6 bytes (`<hhBB`) $\to$ `(upper_flywheel, lower_flywheel, angle_run, angle_reversed)`.
+  - Flywheel-only packet: 4 bytes (`<hh`) $\to$ `(upper_flywheel, lower_flywheel)`.
+  - Angle-only (3 bytes, `<BBB`) and Disable-angle (1 byte, `<B`) remain distinct and non-colliding.
+- **Pico W `Shooter` Subsystem**: Update `start_shoot(upper_speed: float, lower_speed: float | None = None)` to drive `upper_flywheel` and `lower_flywheel` independently.
+
+## 5. Host Integration & Web UI
+- **Control Loop in `main.py`**: 50 Hz control tick coordinating active PIDs, match phase gating, and UART transmissions.
+- **Web Console**:
+  - Single shared speed control (slider + Cross Pad D-pad `4`/`20` step adjustment).
+  - Mode toggle: Auto (Distance) vs. Manual.
+  - Telemetry readouts for target distance, target RPM, and live upper/lower RPMs.
+  - `#battery-text` indicator displaying current shooter speed percentage.
+
+---
+
+# Undetermined Questions / Design Decisions (To Address in Next Steps)
+
+## 1. ESP32 Interface & Protocol (Next Step after PID)
+- **Physical Connection**: USB serial (`/dev/ttyUSB0` or `/dev/ttyACM0`) vs RPi 5 secondary GPIO UART (`/dev/ttyAMA1`).
+- **Wire Protocol**: Binary framed packet matching Pico W vs newline-delimited JSON.
+- **Streaming Rate & Baud Rate**: 115200 baud, 20 Hz / 50 Hz.
 
 ## 2. Sensor Placement & Characteristics
-- **LiDAR Placement & Offsets**: What are the physical mounting offsets $(dx, dy)$ of the 3 distance sensors relative to the robot's center of rotation?
-- **LiDAR Specs & Units**: What is the effective range (min/max in mm or cm) and blind zone?
-- **Geomagnetic Heading**: Does the sensor output absolute azimuth ($0^\circ \sim 360^\circ$ relative to magnetic north) or relative angle? Do we need a "Zero Heading / Calibrate" action on the Web UI before starting the match?
+- **LiDAR Mounting Offsets**: Exact $(dx, dy)$ relative to robot center once physically measured.
+- **LiDAR Specs**: Range and blind zones.
+- **Geomagnetic Heading**: Relative vs absolute azimuth calibration before match start.
 
-## 3. Field Dimensions & Coordinates
-- **Field Size**: **Confirmed** — `500 cm` (Top to Bottom, Y-axis) $\times$ `400 cm` (Left to Right, X-axis).
-- **Coordinate System**: **Confirmed** — Origin $(0, 0)$ is at the bottom-left corner; the 3x3 target grid is on the top wall ($y = 500\text{ cm}$, $0^\circ$ heading faces Top).
-- **Target Grid Location**: Exact horizontal X-coordinates / dimensions of the 3x3 goal grid along the top wall ($y = 500\text{ cm}$) to be measured.
-- **Obstacle Rejection**: **Confirmed** — `PoseEstimator` automatically records the latest valid distances of `L` and `R`; when dual-beam span validation fails, it computes the delta between the previous valid value and the current reading for each side, using only the beam with the smaller delta.
-
-## 4. Autonomous Mode & Workflow
-- **Auto Routine Storage**: Should the routine be defined in a JSON file (e.g. `auto_routines.json`), a Python script, or editable directly in the Web UI?
-- **Motion Control**: Should Auto use closed-loop target pose navigation ($x, y, \theta$ P/PID controller), timed open-loop drive, or a hybrid sequence?
-- **Match Transition**: **Confirmed** — When 1:00 Auto expires, robot immediately stops all motors and enters `AUTO_WAIT`. Robot does not start Tele-Op automatically; operator must manually trigger "Enable Tele-Op" from Web UI to begin the 2:00 Tele-Op period.
-
+## 3. Autonomous Routine Storage
+- Routine definition format: JSON sequence file vs Python script vs interactive Web UI editor.
