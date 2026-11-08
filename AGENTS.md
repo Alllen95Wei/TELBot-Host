@@ -30,21 +30,43 @@ When Auto expires, the robot immediately stops all motors and enters `AUTO_WAIT`
 
 ---
 
-# Undone Tasks
+# Project Tasks Status
 
-1. **PID Controllers**:
-   - Closed-loop Chassis Pose-to-Point PID for autonomous navigation.
-   - Closed-loop Dual Flywheel RPM PID with automatic distance-to-RPM calculation and manual fallback.
-2. **ESP32 Sensor Interface & Telemetry**:
+## Completed Tasks
+- [x] **Reusable PID Core (`core/pid.py`)**:
+  - Generic `PIDController` class supporting position/velocity control with feedforward:
+    $$u(t) = K_v \cdot r(t) + K_s \cdot \operatorname{sgn}(r(t)) + K_p \cdot e(t) + K_i \int e(\tau)\,d\tau - K_d \frac{dy(t)}{dt}$$
+  - Derivative-on-measurement (EMA low-pass filtered, kick-free on setpoint changes).
+  - Output clamping `[out_min, out_max]` (including `out_min = 0` for unidirectional flywheels).
+  - Three-layer anti-windup: `i_zone` gating, integrator saturation freeze, and `max_integral` clamping.
+  - Continuous angle wrapping across $0^\circ / 360^\circ$ into $[-180^\circ, +180^\circ)$.
+  - Immediate `reset()` on zero setpoint / subsystem stop.
+- [x] **Web Console Sensor Telemetry & Controls (`web_panel/`)**:
+  - Compact single-screen layout (fits without scrolling; Gamepad and Simulator moved to modals).
+  - Live Shooter & Aiming Sensor Telemetry block (Target RPM, live/open-loop Upper & Lower RPMs, pitch angle state, distance & aim angle to active goal).
+  - Auto (Distance) vs. Manual speed mode toggle via Web UI, inline/modal sliders, D-Pad Up/Down (`4`/`20`), and gamepad button action (`shooter_speed_auto_toggle`).
+  - Battery/speed percentage indicator (`#battery-text`).
+
+## Undone Tasks
+
+1. **Subsystem PID Controllers (`core/control.py`)**:
+   - Closed-loop Chassis Pose-to-Point PID (`ChassisPoseController`) for autonomous field navigation.
+   - Closed-loop Dual Flywheel RPM PID (`ShooterSpeedController`) with automatic distance-to-RPM calculation and manual fallback.
+2. **Protocol & Slave Firmware Updates**:
+   - Split dual-flywheel packet framing (`PART_SHOOTER`: 4 bytes `<hh` or 6 bytes `<hhBB`).
+   - Pico W firmware update to drive upper and lower flywheels independently in `start_shoot()`.
+3. **Host Control Loop Integration (`main.py`)**:
+   - 50 Hz control tick coordinating active PIDs, match phase gating, and UART transmissions.
+4. **ESP32 Sensor Interface & Telemetry**:
    - Read 3 directional LiDARs, geomagnetic heading, and upper/lower flywheel RPM sensors from ESP32 into RPi 5 Host (to be designed and implemented after PID control).
-3. **Autonomous Routine Storage & Workflow**:
+5. **Autonomous Routine Storage & Workflow**:
    - Sequence runner executing fixed steps during the 1:00 Auto phase (e.g. drive to point $\to$ align $\to$ spin up flywheels $\to$ feed balls).
 
 ---
 
 # PID Controller Implementation Plan
 
-## 1. Reusable PID Core (`core/pid.py`)
+## 1. Reusable PID Core (`core/pid.py`) — [DONE]
 - Generic `PIDController` class supporting position and velocity control with feedforward:
   $$u(t) = K_v \cdot r(t) + K_s \cdot \operatorname{sgn}(r(t)) + K_p \cdot e(t) + K_i \int e(\tau)\,d\tau - K_d \frac{dy(t)}{dt}$$
 - **Safeguards**:
@@ -54,7 +76,7 @@ When Auto expires, the robot immediately stops all motors and enters `AUTO_WAIT`
   - Continuous angle wrapping for heading control across $0^\circ / 360^\circ$ boundary.
   - Immediate `reset()` when target is 0 or subsystem is stopped.
 
-## 2. Chassis Pose-to-Point PID (`ChassisPoseController` in `core/control.py`)
+## 2. Chassis Pose-to-Point PID (`ChassisPoseController` in `core/control.py`) — [TODO]
 - **Inputs**: Current field pose $(x_{\text{cm}}, y_{\text{cm}}, \theta_{\text{deg}})$ from `PoseEstimator.latest_pose`.
 - **Target**: `(target_x_cm, target_y_cm, target_heading_deg)`.
 - **3 Independent Axes**:
@@ -65,7 +87,7 @@ When Auto expires, the robot immediately stops all motors and enters `AUTO_WAIT`
   $$v_x = u_Y \cos\theta + u_X \sin\theta, \qquad v_y = u_X \cos\theta - u_Y \sin\theta$$
 - **Safety**: Auto-zero output on stale/invalid pose; `is_at_target()` check with configurable tolerances.
 
-## 3. Dual Flywheel RPM PID + Distance Auto-Speed (`ShooterSpeedController` in `core/control.py`)
+## 3. Dual Flywheel RPM PID + Distance Auto-Speed (`ShooterSpeedController` in `core/control.py`) — [TODO]
 - **Shared Target**: Operator and auto-distance logic produce **one shared setpoint** ($0 \sim 5500$ RPM).
 - **Dual Independent Regulation**: Two independent PID instances (`upper_pid`, `lower_pid`) regulate upper and lower flywheels separately against the shared target to compensate for physical motor/ESC differences:
   - Outputs clamped to $[0, 1000]$ (no negative output / reverse braking).
@@ -78,7 +100,7 @@ When Auto expires, the robot immediately stops all motors and enters `AUTO_WAIT`
   - When ESP32 live RPM telemetry is present: full closed-loop PID.
   - Before ESP32 is integrated or when RPM data is stale: open-loop feedforward fallback ($\text{cmd} = \text{round}(1000 \times \text{target\_rpm} / 5500)$) to prevent integral windup against missing feedback.
 
-## 4. Protocol & Slave Firmware Updates
+## 4. Protocol & Slave Firmware Updates — [TODO]
 - **UART Framing (`PART_SHOOTER`)**:
   - Full shooter packet: 6 bytes (`<hhBB`) $\to$ `(upper_flywheel, lower_flywheel, angle_run, angle_reversed)`.
   - Flywheel-only packet: 4 bytes (`<hh`) $\to$ `(upper_flywheel, lower_flywheel)`.
@@ -86,8 +108,8 @@ When Auto expires, the robot immediately stops all motors and enters `AUTO_WAIT`
 - **Pico W `Shooter` Subsystem**: Update `start_shoot(upper_speed: float, lower_speed: float | None = None)` to drive `upper_flywheel` and `lower_flywheel` independently.
 
 ## 5. Host Integration & Web UI
-- **Control Loop in `main.py`**: 50 Hz control tick coordinating active PIDs, match phase gating, and UART transmissions.
-- **Web Console**:
+- **Control Loop in `main.py` [TODO]**: 50 Hz control tick coordinating active PIDs, match phase gating, and UART transmissions.
+- **Web Console [DONE]**:
   - Single shared speed control (slider + Cross Pad D-pad `4`/`20` step adjustment).
   - Mode toggle: Auto (Distance) vs. Manual.
   - Telemetry readouts for target distance, target RPM, and live upper/lower RPMs.
