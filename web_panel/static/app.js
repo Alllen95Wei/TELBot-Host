@@ -138,6 +138,8 @@ const controllerState = {
     Back: false,
     Start: false,
   },
+  dpad: 0,
+  prevDpad: 0,
 };
 
 // Toggle states controlled by toggle-type button actions
@@ -240,6 +242,19 @@ function updateButtonGridLabels() {
   }
 }
 
+function updateShooterSpeedUI() {
+  const slider = document.getElementById("shooter-speed-slider");
+  const label = document.getElementById("shooter-speed-val-label");
+  const batteryText = document.getElementById("battery-text");
+
+  if (slider) slider.value = mappingConfig.shooterSpeed;
+  if (label) label.textContent = `${mappingConfig.shooterSpeed}`;
+  if (batteryText) {
+    const pct = Math.round(mappingConfig.shooterSpeed / 10);
+    batteryText.textContent = `${pct}%`;
+  }
+}
+
 function initMappingUI() {
   // Sliders
   const bindSlider = (sliderId, labelId, key, suffix = "") => {
@@ -250,6 +265,9 @@ function initMappingUI() {
     slider.addEventListener("input", () => {
       mappingConfig[key] = Number(slider.value);
       label.textContent = `${mappingConfig[key]}${suffix}`;
+      if (key === "shooterSpeed") {
+        updateShooterSpeedUI();
+      }
       saveMapping();
     });
   };
@@ -258,6 +276,7 @@ function initMappingUI() {
   bindSlider("speed-scale-slider", "speed-scale-val-label", "speedScalePct", "%");
   bindSlider("shooter-speed-slider", "shooter-speed-val-label", "shooterSpeed", "");
   bindSlider("conveyor-speed-slider", "conveyor-speed-val-label", "conveyorSpeed", "");
+  updateShooterSpeedUI();
 
   // Axis Rows
   const axisContainer = document.getElementById("axis-mapping-container");
@@ -514,6 +533,22 @@ function rawF310ToDisplay(rawArray) {
       }
 
       processButtonEdges();
+    } else if (i === 11) {
+      controllerState.prevDpad = controllerState.dpad;
+      controllerState.dpad = rawArray[i];
+
+      // Cross pad input: 4 = Up (increase shooter speed), 20 = Down (decrease shooter speed)
+      if (controllerState.dpad !== controllerState.prevDpad) {
+        if (controllerState.dpad === 4) {
+          mappingConfig.shooterSpeed = Math.min(1000, mappingConfig.shooterSpeed + 50);
+          updateShooterSpeedUI();
+          saveMapping();
+        } else if (controllerState.dpad === 20) {
+          mappingConfig.shooterSpeed = Math.max(0, mappingConfig.shooterSpeed - 50);
+          updateShooterSpeedUI();
+          saveMapping();
+        }
+      }
     }
   }
 
@@ -594,6 +629,8 @@ function clearCurrentDevice() {
     controllerState.buttons[b] = false;
     controllerState.prevButtons[b] = false;
   }
+  controllerState.dpad = 0;
+  controllerState.prevDpad = 0;
   toggleState.shooterActive = false;
   toggleState.spinnerActive = false;
   document.getElementById("forget-btn").setAttribute("disabled", "true");
@@ -908,10 +945,6 @@ function updateStatusFromWs(msg) {
     document.getElementById("uart-stats-text").textContent =
       `TX: ${msg.tx_packets} | RX: ${msg.rx_packets}`;
   }
-  if (msg.telemetry && typeof msg.telemetry.battery_v === "number") {
-    document.getElementById("battery-text").textContent =
-      `${msg.telemetry.battery_v.toFixed(2)} V`;
-  }
   if (msg.match) {
     updateMatchUI(msg.match);
   }
@@ -933,10 +966,6 @@ function initStatusPolling() {
         if (data.stats) {
           document.getElementById("uart-stats-text").textContent =
             `TX: ${data.stats.tx_packets} | RX: ${data.stats.rx_packets}`;
-        }
-        if (data.latest_telemetry && typeof data.latest_telemetry.battery_v === "number") {
-          document.getElementById("battery-text").textContent =
-            `${data.latest_telemetry.battery_v.toFixed(2)} V`;
         }
         if (data.match) {
           updateMatchUI(data.match);
