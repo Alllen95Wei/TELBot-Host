@@ -14,7 +14,7 @@ class Server:
 
 class Safety:
     PING_INTERVAL = 0.2  # seconds (200 ms heartbeat; Pico watchdog is 400 ms)
-    DRIVE_TIMEOUT = 0.5  # seconds (auto-zero chassis drive if commands stop arriving)
+    DRIVE_TIMEOUT = 1    # seconds (auto-zero chassis drive if commands stop arriving)
 
 
 class EStop:
