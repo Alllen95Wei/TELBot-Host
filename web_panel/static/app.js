@@ -60,6 +60,7 @@ const BUTTON_ACTIONS = [
   { id: "angle_down_hold", label: "Shooter Angle Down (Hold)", short: "Pitch -" },
   { id: "angle_disable", label: "Shooter Angle Disable (On Press)", short: "Pitch Off" },
   { id: "angle_disable_release", label: "Shooter Angle Disable (On Release)", short: "Pitch Off (Rel)" },
+  { id: "shooter_speed_auto_toggle", label: "Shooter Flywheel Speed Auto Mode (Toggle)", short: "Shoot Spd Auto (Tgl)" },
   { id: "zero_all", label: "Zero All Latch States", short: "Reset States" },
 ];
 
@@ -147,6 +148,7 @@ const controllerState = {
 const toggleState = {
   shooterActive: false,
   spinnerActive: false,
+  shooterSpeedAuto: true,
 };
 
 // Outgoing command snapshot
@@ -166,6 +168,22 @@ let ws = null;
 let wsConnected = false;
 let controlArmed = true;
 
+// Shooter Speed Mode & Sensor Telemetry State
+const MAX_FLYWHEEL_RPM = 5500;
+const DISTANCE_TO_RPM_TABLE = [
+  { distCm: 80, rpm: 2400 },
+  { distCm: 140, rpm: 2950 },
+  { distCm: 200, rpm: 3450 },
+  { distCm: 260, rpm: 3900 },
+  { distCm: 320, rpm: 4350 },
+  { distCm: 380, rpm: 4750 },
+  { distCm: 450, rpm: 5200 },
+];
+
+let shooterSpeedMode = "auto"; // "auto" (Distance-based) or "manual"
+let latestTelemetryData = null;
+const uiAngleState = { run: false, reversed: false };
+
 // ============================================================================
 // Initialization
 // ============================================================================
@@ -174,9 +192,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("host-origin-label").textContent = window.location.origin;
 
   initThemeToggle();
+  initModals();
   initMatchControls();
   initButtonGridUI();
   initMappingUI();
+  initSensorTelemetryUI();
   initVideoControls();
   initControlSwitches();
   initFieldPoseMap();
@@ -188,6 +208,64 @@ document.addEventListener("DOMContentLoaded", async () => {
   // Real-time control loop
   setInterval(controlTick, WS_INTERVAL_MS);
 });
+
+// ============================================================================
+// Modals (Controller Mapping & Sensor Simulator)
+// ============================================================================
+function initModals() {
+  const bindDialog = (dialogId, openBtnIds, closeBtnId) => {
+    const dialog = document.getElementById(dialogId);
+    if (!dialog) return;
+
+    const openModal = () => {
+      if (typeof dialog.showModal === "function" && !dialog.open) {
+        dialog.showModal();
+      } else {
+        dialog.setAttribute("open", "true");
+      }
+    };
+
+    const closeModal = () => {
+      if (typeof dialog.close === "function" && dialog.open) {
+        dialog.close();
+      } else {
+        dialog.removeAttribute("open");
+      }
+    };
+
+    for (const btnId of openBtnIds) {
+      const btn = document.getElementById(btnId);
+      if (btn) btn.addEventListener("click", openModal);
+    }
+
+    const closeBtn = document.getElementById(closeBtnId);
+    if (closeBtn) closeBtn.addEventListener("click", closeModal);
+
+    // Close when clicking backdrop outside modal content
+    dialog.addEventListener("click", (evt) => {
+      const rect = dialog.getBoundingClientRect();
+      const clickedInDialog =
+        evt.clientX >= rect.left &&
+        evt.clientX <= rect.right &&
+        evt.clientY >= rect.top &&
+        evt.clientY <= rect.bottom;
+      if (!clickedInDialog) {
+        closeModal();
+      }
+    });
+  };
+
+  bindDialog(
+    "controller-modal",
+    ["open-controller-modal-btn", "hid-status-chip"],
+    "close-controller-modal-btn"
+  );
+  bindDialog(
+    "simulator-modal",
+    ["open-simulator-modal-btn", "open-sim-inline-btn"],
+    "close-simulator-modal-btn"
+  );
+}
 
 // ============================================================================
 // Persistence & Mapping UI
@@ -277,13 +355,306 @@ function updateButtonGridLabels() {
 function updateShooterSpeedUI() {
   const slider = document.getElementById("shooter-speed-slider");
   const label = document.getElementById("shooter-speed-val-label");
+  const inlineSlider = document.getElementById("inline-shooter-speed-slider");
+  const inlineLabel = document.getElementById("inline-shooter-speed-label");
   const batteryText = document.getElementById("battery-text");
 
-  if (slider) slider.value = mappingConfig.shooterSpeed;
-  if (label) label.textContent = `${mappingConfig.shooterSpeed}`;
+  const speedCmd = Math.round(mappingConfig.shooterSpeed);
+  const pct = Math.round(speedCmd / 10);
+
+  if (slider) slider.value = speedCmd;
+  if (label) label.textContent = `${speedCmd}`;
+  if (inlineSlider) inlineSlider.value = speedCmd;
+  if (inlineLabel) inlineLabel.textContent = `${speedCmd} (${pct}%)`;
   if (batteryText) {
-    const pct = Math.round(mappingConfig.shooterSpeed / 10);
     batteryText.textContent = `${pct}%`;
+  }
+
+  updateSensorTelemetryUI();
+}
+
+function setShooterSpeedMode(mode) {
+  const isAuto = mode !== "manual";
+  shooterSpeedMode = isAuto ? "auto" : "manual";
+  toggleState.shooterSpeedAuto = isAuto;
+
+  const chip = document.getElementById("shooter-mode-chip");
+  const icon = document.getElementById("shooter-mode-icon");
+  const text = document.getElementById("shooter-mode-text");
+  const autoBtn = document.getElementById("shooter-mode-auto-btn");
+  const manualBtn = document.getElementById("shooter-mode-manual-btn");
+
+  if (chip) {
+    chip.classList.toggle("primary", isAuto);
+  }
+  if (icon) {
+    icon.textContent = isAuto ? "hdr_auto" : "tune";
+  }
+  if (text) {
+    text.textContent = isAuto ? "Mode: Auto (Dist)" : "Mode: Manual";
+  }
+  if (autoBtn) {
+    autoBtn.classList.toggle("primary", isAuto);
+    autoBtn.classList.toggle("border", !isAuto);
+  }
+  if (manualBtn) {
+    manualBtn.classList.toggle("primary", !isAuto);
+    manualBtn.classList.toggle("border", isAuto);
+  }
+
+  if (isAuto) {
+    applyAutoDistanceSpeed();
+  } else {
+    updateSensorTelemetryUI();
+  }
+}
+
+function interpolateDistanceToRpm(distCm) {
+  if (typeof distCm !== "number" || !Number.isFinite(distCm) || distCm <= 0) {
+    return null;
+  }
+  const tbl = DISTANCE_TO_RPM_TABLE;
+  if (distCm <= tbl[0].distCm) return tbl[0].rpm;
+  if (distCm >= tbl[tbl.length - 1].distCm) return tbl[tbl.length - 1].rpm;
+
+  for (let i = 0; i < tbl.length - 1; i++) {
+    const p0 = tbl[i];
+    const p1 = tbl[i + 1];
+    if (distCm >= p0.distCm && distCm <= p1.distCm) {
+      const t = (distCm - p0.distCm) / (p1.distCm - p0.distCm);
+      return Math.round(p0.rpm + t * (p1.rpm - p0.rpm));
+    }
+  }
+  return tbl[0].rpm;
+}
+
+function computeTargetGoalGeometry() {
+  let targetX = 200.0;
+  let targetY = 500.0;
+  let goalLabel = "Center (200)";
+
+  if (currentVisionState && currentVisionState.latched && currentVisionState.active_target) {
+    const col = String(currentVisionState.active_target).toLowerCase();
+    if (col === "left") {
+      targetX = 140.0;
+      goalLabel = "1x3 Left (140)";
+    } else if (col === "center") {
+      targetX = 200.0;
+      goalLabel = "1x3 Center (200)";
+    } else if (col === "right") {
+      targetX = 260.0;
+      goalLabel = "1x3 Right (260)";
+    }
+  }
+
+  if (
+    !currentPoseState ||
+    typeof currentPoseState.x_cm !== "number" ||
+    typeof currentPoseState.y_cm !== "number"
+  ) {
+    return {
+      hasPose: false,
+      distCm: null,
+      aimHeadingDeg: null,
+      headingErrDeg: null,
+      goalLabel,
+    };
+  }
+
+  const dx = targetX - currentPoseState.x_cm;
+  const dy = targetY - currentPoseState.y_cm;
+  const distCm = Math.hypot(dx, dy);
+  // 0 deg = +Y (Top wall), 90 deg = +X (Right wall)
+  const aimHeadingDeg = ((Math.atan2(dx, dy) * 180.0) / Math.PI + 360.0) % 360.0;
+  let headingErrDeg = null;
+  if (typeof currentPoseState.heading_deg === "number") {
+    headingErrDeg = ((aimHeadingDeg - currentPoseState.heading_deg + 540.0) % 360.0) - 180.0;
+  }
+
+  return {
+    hasPose: true,
+    distCm,
+    aimHeadingDeg,
+    headingErrDeg,
+    goalLabel,
+  };
+}
+
+function applyAutoDistanceSpeed() {
+  if (!toggleState.shooterSpeedAuto || shooterSpeedMode !== "auto") return;
+  const geom = computeTargetGoalGeometry();
+  if (geom.hasPose && typeof geom.distCm === "number") {
+    const autoRpm = interpolateDistanceToRpm(geom.distCm);
+    if (typeof autoRpm === "number") {
+      const cmd = Math.max(0, Math.min(1000, Math.round((autoRpm / MAX_FLYWHEEL_RPM) * 1000)));
+      mappingConfig.shooterSpeed = cmd;
+    }
+  }
+  updateShooterSpeedUI();
+}
+
+function initSensorTelemetryUI() {
+  const autoBtn = document.getElementById("shooter-mode-auto-btn");
+  const manualBtn = document.getElementById("shooter-mode-manual-btn");
+  const inlineSlider = document.getElementById("inline-shooter-speed-slider");
+
+  if (autoBtn) {
+    autoBtn.addEventListener("click", () => setShooterSpeedMode("auto"));
+  }
+  if (manualBtn) {
+    manualBtn.addEventListener("click", () => setShooterSpeedMode("manual"));
+  }
+  if (inlineSlider) {
+    inlineSlider.addEventListener("input", () => {
+      mappingConfig.shooterSpeed = Number(inlineSlider.value);
+      if (shooterSpeedMode !== "manual") {
+        setShooterSpeedMode("manual");
+      }
+      updateShooterSpeedUI();
+      saveMapping();
+    });
+  }
+
+  setShooterSpeedMode("auto");
+}
+
+function updateSensorTelemetryUI() {
+  const targetRpmEl = document.getElementById("sensor-target-rpm");
+  const targetDutyBadgeEl = document.getElementById("sensor-target-duty-badge");
+  const targetRpmSubEl = document.getElementById("sensor-target-rpm-sub");
+
+  const upperRpmEl = document.getElementById("sensor-upper-rpm");
+  const upperBadgeEl = document.getElementById("sensor-upper-status-badge");
+  const upperSubEl = document.getElementById("sensor-upper-rpm-sub");
+
+  const lowerRpmEl = document.getElementById("sensor-lower-rpm");
+  const lowerBadgeEl = document.getElementById("sensor-lower-status-badge");
+  const lowerSubEl = document.getElementById("sensor-lower-rpm-sub");
+
+  const angleValEl = document.getElementById("sensor-shooter-angle");
+  const angleBadgeEl = document.getElementById("sensor-angle-dir-badge");
+  const angleSubEl = document.getElementById("sensor-shooter-angle-sub");
+
+  const distValEl = document.getElementById("sensor-target-dist");
+  const distColBadgeEl = document.getElementById("sensor-target-col-badge");
+  const distAimSubEl = document.getElementById("sensor-target-aim-sub");
+
+  // 1. Target RPM & Duty Setpoint
+  const speedCmd = Math.round(mappingConfig.shooterSpeed || 0);
+  const setpointRpm = Math.round((speedCmd / 1000) * MAX_FLYWHEEL_RPM);
+  const isShootingNow =
+    controllerState.connected &&
+    (toggleState.shooterActive || isActionHeld("shooter_hold"));
+  const activeCmd = isShootingNow ? speedCmd : 0;
+
+  if (targetRpmEl) {
+    targetRpmEl.textContent = `${setpointRpm} RPM`;
+  }
+  if (targetDutyBadgeEl) {
+    targetDutyBadgeEl.textContent = isShootingNow ? `ACTIVE: ${activeCmd}` : `Set: ${speedCmd}`;
+    targetDutyBadgeEl.classList.toggle("badge-live", isShootingNow);
+  }
+  if (targetRpmSubEl) {
+    targetRpmSubEl.textContent =
+      shooterSpeedMode === "auto"
+        ? `Auto Distance (${Math.round(speedCmd / 10)}% duty)`
+        : `Manual Override (${Math.round(speedCmd / 10)}% duty)`;
+  }
+
+  // 2 & 3. Measured Upper & Lower Flywheel RPM (from ESP32 / Telemetry when present)
+  const telem = latestTelemetryData || {};
+  const upperRpm =
+    typeof telem.upper_rpm === "number"
+      ? telem.upper_rpm
+      : typeof telem.flywheel_upper_rpm === "number"
+        ? telem.flywheel_upper_rpm
+        : null;
+  const lowerRpm =
+    typeof telem.lower_rpm === "number"
+      ? telem.lower_rpm
+      : typeof telem.flywheel_lower_rpm === "number"
+        ? telem.flywheel_lower_rpm
+        : null;
+
+  if (upperRpmEl && upperBadgeEl && upperSubEl) {
+    if (upperRpm !== null) {
+      const err = Math.round(upperRpm - (isShootingNow ? setpointRpm : 0));
+      upperRpmEl.textContent = `${Math.round(upperRpm)} RPM`;
+      upperBadgeEl.textContent = "LIVE PID";
+      upperBadgeEl.classList.add("badge-live");
+      upperSubEl.textContent = `Err: ${err >= 0 ? "+" : ""}${err} RPM`;
+    } else {
+      upperRpmEl.textContent = "---- RPM";
+      upperBadgeEl.textContent = "Open-Loop";
+      upperBadgeEl.classList.remove("badge-live");
+      upperSubEl.textContent = isShootingNow
+        ? `FF Cmd: ${activeCmd} / 1000`
+        : "Awaiting ESP32 RPM";
+    }
+  }
+
+  if (lowerRpmEl && lowerBadgeEl && lowerSubEl) {
+    if (lowerRpm !== null) {
+      const err = Math.round(lowerRpm - (isShootingNow ? setpointRpm : 0));
+      lowerRpmEl.textContent = `${Math.round(lowerRpm)} RPM`;
+      lowerBadgeEl.textContent = "LIVE PID";
+      lowerBadgeEl.classList.add("badge-live");
+      lowerSubEl.textContent = `Err: ${err >= 0 ? "+" : ""}${err} RPM`;
+    } else {
+      lowerRpmEl.textContent = "---- RPM";
+      lowerBadgeEl.textContent = "Open-Loop";
+      lowerBadgeEl.classList.remove("badge-live");
+      lowerSubEl.textContent = isShootingNow
+        ? `FF Cmd: ${activeCmd} / 1000`
+        : "Awaiting ESP32 RPM";
+    }
+  }
+
+  // 4. Shooter Pitch Angle & Stepper Status
+  const measuredAngle =
+    typeof telem.shooter_angle_deg === "number"
+      ? telem.shooter_angle_deg
+      : typeof telem.pitch_deg === "number"
+        ? telem.pitch_deg
+        : null;
+
+  if (angleValEl && angleBadgeEl && angleSubEl) {
+    const angleRun = Boolean(uiAngleState.run);
+    const angleRev = Boolean(uiAngleState.reversed);
+    const stepperState = angleRun ? (angleRev ? "PITCH - (REV)" : "PITCH + (FWD)") : "OFF";
+
+    if (measuredAngle !== null) {
+      angleValEl.textContent = `${measuredAngle.toFixed(1)}\u00B0`;
+    } else {
+      angleValEl.textContent = angleRun ? (angleRev ? "DOWN \u2193" : "UP \u2191") : "---.-\u00B0";
+    }
+
+    angleBadgeEl.textContent = angleRun ? (angleRev ? "REV" : "FWD") : "IDLE";
+    angleBadgeEl.classList.toggle("badge-active", angleRun);
+    angleSubEl.textContent = `Stepper: ${stepperState}`;
+  }
+
+  // 5. Distance to Target & Aim Heading
+  const geom = computeTargetGoalGeometry();
+  if (distValEl && distColBadgeEl && distAimSubEl) {
+    distColBadgeEl.textContent = geom.goalLabel;
+    distColBadgeEl.classList.toggle(
+      "badge-active",
+      Boolean(currentVisionState && currentVisionState.latched)
+    );
+
+    if (geom.hasPose && typeof geom.distCm === "number") {
+      distValEl.textContent = `${geom.distCm.toFixed(1)} cm`;
+      const aimStr = `${geom.aimHeadingDeg.toFixed(1)}\u00B0`;
+      const errStr =
+        typeof geom.headingErrDeg === "number"
+          ? ` (\u0394${geom.headingErrDeg >= 0 ? "+" : ""}${geom.headingErrDeg.toFixed(1)}\u00B0)`
+          : "";
+      distAimSubEl.textContent = `Aim: ${aimStr}${errStr}`;
+    } else {
+      distValEl.textContent = "---.- cm";
+      distAimSubEl.textContent = "Aim Heading: ---.-\u00B0";
+    }
   }
 }
 
@@ -298,6 +669,9 @@ function initMappingUI() {
       mappingConfig[key] = Number(slider.value);
       label.textContent = `${mappingConfig[key]}${suffix}`;
       if (key === "shooterSpeed") {
+        if (shooterSpeedMode !== "manual") {
+          setShooterSpeedMode("manual");
+        }
         updateShooterSpeedUI();
       }
       saveMapping();
@@ -453,6 +827,17 @@ async function checkHIDPerm() {
   return devices.length !== 0;
 }
 
+function updateHidStatusChip(connected, name = "") {
+  const chip = document.getElementById("hid-status-chip");
+  const icon = document.getElementById("hid-status-icon");
+  const text = document.getElementById("hid-status-text");
+  if (!chip || !icon || !text) return;
+
+  chip.classList.toggle("primary", Boolean(connected));
+  icon.textContent = connected ? "sports_esports" : "usb_off";
+  text.textContent = connected ? `HID: ${name || "Connected"}` : "HID: Disconnected";
+}
+
 async function setHIDDevices() {
   const devices = await navigator.hid.getDevices();
   if (!devices || devices.length === 0) return;
@@ -462,9 +847,11 @@ async function setHIDDevices() {
   currentDevice = device;
   controllerState.connected = true;
 
+  const prodName = device.productName || "HID Controller";
   document.getElementById("connected-device-text").textContent =
-    `${device.productName || "HID Controller"} (0x${device.productId.toString(16)})`;
+    `${prodName} (0x${device.productId.toString(16)})`;
   document.getElementById("forget-btn").removeAttribute("disabled");
+  updateHidStatusChip(true, prodName);
 
   device.oninputreport = (event) => {
     const data = new Uint8Array(event.data.buffer);
@@ -585,11 +972,19 @@ function rawF310ToDisplay(rawArray) {
       // Cross pad input: 4 = Up (increase shooter speed), 20 = Down (decrease shooter speed)
       if (controllerState.dpad !== controllerState.prevDpad) {
         if (controllerState.dpad === 4) {
+          toggleState.shooterSpeedAuto = false;
           mappingConfig.shooterSpeed = Math.min(1000, mappingConfig.shooterSpeed + 50);
+          if (shooterSpeedMode !== "manual") {
+            setShooterSpeedMode("manual");
+          }
           updateShooterSpeedUI();
           saveMapping();
         } else if (controllerState.dpad === 20) {
+          toggleState.shooterSpeedAuto = false;
           mappingConfig.shooterSpeed = Math.max(0, mappingConfig.shooterSpeed - 50);
+          if (shooterSpeedMode !== "manual") {
+            setShooterSpeedMode("manual");
+          }
           updateShooterSpeedUI();
           saveMapping();
         }
@@ -622,6 +1017,10 @@ function processButtonEdges() {
         } else if (action === "zero_all") {
           toggleState.shooterActive = false;
           toggleState.spinnerActive = false;
+        } else if (action === "shooter_speed_auto_toggle") {
+          toggleState.shooterSpeedAuto = true;
+          setShooterSpeedMode("auto");
+          saveMapping();
         }
       }
     }
@@ -677,6 +1076,7 @@ function clearCurrentDevice() {
   document.getElementById("connected-device-text").textContent = "Disconnected (Logitech F310)";
   currentDevice = null;
   controllerState.connected = false;
+  updateHidStatusChip(false);
   for (const k of Object.keys(controllerState.axesNorm)) {
     controllerState.axesNorm[k] = 0;
     controllerState.axesPct[k] = 0;
@@ -692,6 +1092,7 @@ function clearCurrentDevice() {
   document.getElementById("forget-btn").setAttribute("disabled", "true");
   clearTable();
   updateControllerVisuals();
+  updateSensorTelemetryUI();
 }
 
 // ============================================================================
@@ -778,6 +1179,9 @@ function controlTick() {
   const omega = controllerState.connected ? evaluateMappedAxis("omega", true) : 0;
 
   // 2. Evaluate Shooter (Flywheel + Pitch Angle Stepper)
+  if (toggleState.shooterSpeedAuto && shooterSpeedMode !== "auto") {
+    setShooterSpeedMode("auto");
+  }
   const shootActive =
     controllerState.connected &&
     (toggleState.shooterActive || isActionHeld("shooter_hold"));
@@ -820,6 +1224,10 @@ function controlTick() {
     angleRun ? (angleReversed ? "REV" : "FWD") : "OFF";
   document.getElementById("cmd-conveyor").textContent =
     `${trigger} | ${spinnerRun ? (spinnerReversed ? "REV" : "FWD") : "OFF"}`;
+
+  uiAngleState.run = angleRun;
+  uiAngleState.reversed = angleReversed;
+  updateSensorTelemetryUI();
 
   const armedLabel = document.getElementById("control-armed-label");
   if (armedLabel) {
@@ -1002,6 +1410,10 @@ function updateStatusFromWs(msg) {
     document.getElementById("uart-stats-text").textContent =
       `TX: ${msg.tx_packets} | RX: ${msg.rx_packets}`;
   }
+  if (msg.telemetry) {
+    latestTelemetryData = msg.telemetry;
+    updateSensorTelemetryUI();
+  }
   if (msg.match) {
     updateMatchUI(msg.match);
   }
@@ -1023,6 +1435,10 @@ function initStatusPolling() {
         if (data.stats) {
           document.getElementById("uart-stats-text").textContent =
             `TX: ${data.stats.tx_packets} | RX: ${data.stats.rx_packets}`;
+        }
+        if (data.latest_telemetry) {
+          latestTelemetryData = data.latest_telemetry;
+          updateSensorTelemetryUI();
         }
         if (data.match) {
           updateMatchUI(data.match);
@@ -1247,17 +1663,23 @@ function updateVisionUI(vision) {
 
   const chip = document.getElementById("vision-target-chip");
   const icon = document.getElementById("vision-target-icon");
+  const text = document.getElementById("vision-target-text");
 
   if (chip && icon && text) {
     chip.classList.remove("vision-chip-active", "vision-chip-searching");
     if (currentVisionState.latched && currentVisionState.active_target !== "none") {
       chip.classList.add("vision-chip-active");
       icon.textContent = "verified";
+      text.textContent = `1x3: ${String(currentVisionState.active_target).toUpperCase()}`;
     } else {
       chip.classList.add("vision-chip-searching");
       icon.textContent = "center_focus_weak";
+      text.textContent = "1x3: Unlatched";
     }
   }
+
+  applyAutoDistanceSpeed();
+  updateSensorTelemetryUI();
 
   // Redraw field map to reflect target highlighting
   if (typeof drawFieldMap === "function") {
@@ -1293,6 +1715,7 @@ function initFieldPoseMap() {
   document.getElementById("pose-reset-btn").addEventListener("click", async () => {
     poseTrail.length = 0;
     currentPoseState = null;
+    updateSensorTelemetryUI();
     drawFieldMap(null);
     try {
       await fetch("/api/pose/calibrate", {
@@ -1483,6 +1906,8 @@ function updatePoseUI(pose) {
     }
   }
 
+  applyAutoDistanceSpeed();
+  updateSensorTelemetryUI();
   drawFieldMap(pose);
 }
 

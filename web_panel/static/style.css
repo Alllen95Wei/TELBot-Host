@@ -3,7 +3,7 @@
    ========================================================================== */
 
 :root {
-  --stick-pad-size: 132px;
+  --stick-pad-size: 120px;
 }
 
 body {
@@ -11,21 +11,35 @@ body {
   overflow-x: hidden;
 }
 
+main.dashboard-main {
+  padding-top: 8px !important;
+  padding-bottom: 8px !important;
+}
+
 .mono {
   font-family: monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New";
 }
 
+.tiny-space {
+  height: 6px;
+}
+
 /* Top bar & E-Stop Alert Banner */
 .topbar-card {
-  margin-bottom: 12px;
+  margin-bottom: 8px !important;
+  padding: 8px 14px !important;
+}
+
+#hid-status-chip {
+  cursor: pointer;
 }
 
 .estop-banner {
   background: var(--error) !important;
   color: var(--on-error) !important;
-  border-radius: 12px;
-  padding: 10px 16px;
-  margin-bottom: 12px;
+  border-radius: 10px;
+  padding: 8px 14px;
+  margin-bottom: 8px;
   font-weight: 700;
   animation: pulse-estop 1.2s infinite ease-in-out;
 }
@@ -39,13 +53,35 @@ body {
   50% { opacity: 0.78; }
 }
 
-/* 16:9 Video Viewport */
+/* Dashboard Compact Layout */
+.dashboard-grid {
+  margin-top: 0 !important;
+}
+
+.dashboard-col {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.compact-card {
+  margin: 0 !important;
+  padding: 10px 14px !important;
+}
+
+.compact-metric-grid {
+  gap: 6px !important;
+}
+
+/* 16:9 Video Viewport (Constrained height to fit single screen without scrolling) */
 .video-container {
   position: relative;
   width: 100%;
   aspect-ratio: 16 / 9;
+  max-height: calc(100vh - 335px);
+  min-height: 220px;
   background: #0b0d12;
-  border-radius: 14px;
+  border-radius: 12px;
   overflow: hidden;
   display: flex;
   align-items: center;
@@ -67,7 +103,7 @@ body {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  gap: 6px;
   background: rgba(12, 14, 20, 0.88);
   color: #e2e8f0;
   text-align: center;
@@ -107,192 +143,87 @@ body {
   border-radius: 50%;
 }
 
-/* 2D Analog Stick Pads */
-.stick-card {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  padding: 12px;
-  border-radius: 12px;
-  background: var(--surface-container);
-}
-
-.stick-pad {
-  position: relative;
-  width: var(--stick-pad-size);
-  height: var(--stick-pad-size);
-  border-radius: 50%;
-  background: var(--surface-container-highest);
-  border: 2px solid var(--outline-variant);
-  overflow: hidden;
-}
-
-.stick-axis-x,
-.stick-axis-y {
-  position: absolute;
-  background: var(--outline-variant);
-  opacity: 0.5;
-}
-
-.stick-axis-x {
-  top: 50%;
-  left: 0;
-  right: 0;
-  height: 1px;
-}
-
-.stick-axis-y {
-  left: 50%;
-  top: 0;
-  bottom: 0;
-  width: 1px;
-}
-
-.stick-dot {
-  position: absolute;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  background: var(--primary);
-  box-shadow: 0 0 10px var(--primary);
-  transform: translate(-50%, -50%);
-  left: 50%;
-  top: 50%;
-  transition: left 35ms linear, top 35ms linear;
-}
-
-/* Controller Buttons Matrix */
-.btn-grid {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 8px;
-}
-
-.controller-btn-pill {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  padding: 8px 6px;
-  border-radius: 12px;
-  border: 1px solid var(--outline-variant);
-  background: var(--surface-container);
-  transition: all 80ms ease;
-  user-select: none;
-  text-align: center;
-}
-
-.controller-btn-pill.active {
-  background: var(--primary);
-  color: var(--on-primary);
-  border-color: var(--primary);
-  transform: scale(0.97);
-}
-
-.controller-btn-pill .btn-name {
-  font-weight: 700;
-  font-size: 0.95rem;
-}
-
-.controller-btn-pill .btn-action-label {
-  font-size: 0.7rem;
-  opacity: 0.8;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 100%;
-}
-
-/* Raw Report Table (from PoC) */
-.raw-table-wrap {
-  overflow-x: auto;
-  margin-top: 8px;
-}
-
-table.report-table {
-  width: 100%;
-  border-collapse: collapse;
-  table-layout: fixed;
-  font-size: 0.78rem;
-}
-
-table.report-table th,
-table.report-table td {
-  border: 1px solid var(--outline-variant);
-  padding: 4px 3px;
-  text-align: center;
-}
-
-/* Command Telemetry Readout Boxes */
+/* Command & Sensor Telemetry Readout Boxes */
 .cmd-metric {
-  padding: 10px 12px;
-  border-radius: 12px;
+  padding: 8px 10px;
+  border-radius: 10px;
   background: var(--surface-container);
   border: 1px solid var(--outline-variant);
+}
+
+.cmd-metric.compact {
+  padding: 6px 8px;
 }
 
 .cmd-metric .label {
-  font-size: 0.75rem;
-  opacity: 0.75;
+  font-size: 0.72rem;
+  opacity: 0.78;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .cmd-metric .value {
-  font-size: 1.15rem;
+  font-size: 1.05rem;
   font-weight: 700;
+  line-height: 1.25;
 }
 
-/* Compact field spacing inside mapping table */
-.mapping-row {
+.cmd-metric.compact .value {
+  font-size: 0.96rem;
+}
+
+/* Sensor Telemetry Specific Styling */
+.sensor-telemetry-card {
+  border-color: var(--primary-container, var(--outline-variant));
+}
+
+.sensor-box {
   display: flex;
-  align-items: center;
+  flex-direction: column;
   justify-content: space-between;
-  gap: 8px;
-  padding: 6px 0;
-  border-bottom: 1px solid var(--surface-container-highest);
+  min-height: 70px;
+  padding: 7px 10px;
 }
 
-.mapping-row:last-child {
-  border-bottom: none;
+.sensor-box.highlight-target {
+  background: var(--surface-container-high, var(--surface-container));
+  border-color: var(--primary);
 }
 
-.btn-mapping-details {
-  border-bottom: 1px solid var(--surface-container-highest);
+.sensor-box .value {
+  font-size: 1.15rem;
+  font-weight: 800;
+  margin: 2px 0;
 }
 
-.btn-mapping-details:last-child {
-  border-bottom: none;
-}
-
-.btn-mapping-summary {
-  cursor: pointer;
-  list-style: none;
-  border-bottom: none;
-}
-
-.btn-summary-badge {
-  padding: 2px 8px;
-  border-radius: 8px;
-  background: var(--surface-container);
-  border: 1px solid var(--outline-variant);
-  max-width: 240px;
+.sensor-box .sub-label {
+  font-size: 0.68rem;
+  opacity: 0.7;
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
-.btn-action-check-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 4px 10px;
-  padding: 6px 8px 10px 8px;
-  background: var(--surface-container-low, rgba(255, 255, 255, 0.03));
-  border-radius: 8px;
-  margin-bottom: 6px;
+.tiny-badge {
+  font-size: 0.66rem;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--surface-container-highest);
+  border: 1px solid var(--outline-variant);
+  font-weight: 600;
 }
 
-.btn-action-check {
-  margin: 0 !important;
+.tiny-badge.badge-live {
+  background: rgba(16, 185, 129, 0.2);
+  color: #34d399;
+  border-color: rgba(16, 185, 129, 0.5);
+}
+
+.tiny-badge.badge-active {
+  background: rgba(56, 189, 248, 0.2);
+  color: #38bdf8;
+  border-color: rgba(56, 189, 248, 0.5);
 }
 
 /* 2D Field Pose Map Canvas */
@@ -301,23 +232,26 @@ table.report-table td {
   justify-content: center;
   align-items: center;
   background: #0b0f17;
-  border-radius: 14px;
+  border-radius: 12px;
   border: 1px solid var(--outline-variant);
-  padding: 10px;
+  padding: 6px;
 }
 
 #field-map-canvas {
   width: 100%;
-  max-width: 340px;
+  max-width: 225px;
+  max-height: calc(100vh - 460px);
+  min-height: 190px;
   aspect-ratio: 4 / 5;
   display: block;
   cursor: crosshair;
+  object-fit: contain;
 }
 
 .legend-dot {
   display: inline-block;
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
   margin-right: 4px;
 }
@@ -326,16 +260,16 @@ table.report-table td {
    Match Management & Competition Countdown Timer
    ========================================================================== */
 .match-card {
-  margin-bottom: 12px;
-  padding: 12px 18px;
+  margin-bottom: 8px !important;
+  padding: 8px 14px !important;
   background: var(--surface-container-low);
 }
 
 .match-timer-display {
-  font-size: 2.2rem;
+  font-size: 1.75rem;
   font-weight: 800;
   letter-spacing: 0.05em;
-  line-height: 1.1;
+  line-height: 1.05;
   color: var(--on-surface);
 }
 
@@ -343,12 +277,12 @@ table.report-table td {
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.03em;
-  padding: 4px 12px;
+  padding: 3px 10px;
   border-radius: 9999px;
-  font-size: 0.85rem;
+  font-size: 0.78rem;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
 }
 
 .match-mode-disarmed {
@@ -427,6 +361,209 @@ table.report-table td {
   border: 1px dashed var(--outline);
 }
 
+/* ==========================================================================
+   Modals (Controller Status & Mapping, Sensor Simulator)
+   ========================================================================== */
+dialog.large-modal {
+  width: min(94vw, 1140px);
+  max-width: 1140px;
+  max-height: 90vh;
+  overflow-y: auto;
+  padding: 16px 20px;
+}
 
+dialog.medium-modal {
+  width: min(92vw, 640px);
+  max-width: 640px;
+  max-height: 88vh;
+  overflow-y: auto;
+  padding: 16px 20px;
+}
 
+dialog.modal::backdrop {
+  background: rgba(0, 0, 0, 0.65);
+  backdrop-filter: blur(2px);
+}
 
+.modal {
+  background-color: #141316e6 !important;
+}
+
+.modal-header {
+  position: sticky;
+  top: -16px;
+  z-index: 10;
+  background: inherit;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--outline-variant);
+}
+
+/* 2D Analog Stick Pads (Inside Controller Modal) */
+.stick-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 10px;
+  border-radius: 12px;
+  background: var(--surface-container);
+}
+
+.stick-pad {
+  position: relative;
+  width: var(--stick-pad-size);
+  height: var(--stick-pad-size);
+  border-radius: 50%;
+  background: var(--surface-container-highest);
+  border: 2px solid var(--outline-variant);
+  overflow: hidden;
+}
+
+.stick-axis-x,
+.stick-axis-y {
+  position: absolute;
+  background: var(--outline-variant);
+  opacity: 0.5;
+}
+
+.stick-axis-x {
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 1px;
+}
+
+.stick-axis-y {
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+}
+
+.stick-dot {
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--primary);
+  box-shadow: 0 0 10px var(--primary);
+  transform: translate(-50%, -50%);
+  left: 50%;
+  top: 50%;
+  transition: left 35ms linear, top 35ms linear;
+}
+
+/* Controller Buttons Matrix */
+.btn-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+
+.controller-btn-pill {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+  border-radius: 10px;
+  border: 1px solid var(--outline-variant);
+  background: var(--surface-container);
+  transition: all 80ms ease;
+  user-select: none;
+  text-align: center;
+}
+
+.controller-btn-pill.active {
+  background: var(--primary);
+  color: var(--on-primary);
+  border-color: var(--primary);
+  transform: scale(0.97);
+}
+
+.controller-btn-pill .btn-name {
+  font-weight: 700;
+  font-size: 0.9rem;
+}
+
+.controller-btn-pill .btn-action-label {
+  font-size: 0.68rem;
+  opacity: 0.8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+/* Raw Report Table (from PoC) */
+.raw-table-wrap {
+  overflow-x: auto;
+  margin-top: 8px;
+}
+
+table.report-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 0.75rem;
+}
+
+table.report-table th,
+table.report-table td {
+  border: 1px solid var(--outline-variant);
+  padding: 4px 3px;
+  text-align: center;
+}
+
+/* Compact field spacing inside mapping table */
+.mapping-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--surface-container-highest);
+}
+
+.mapping-row:last-child {
+  border-bottom: none;
+}
+
+.btn-mapping-details {
+  border-bottom: 1px solid var(--surface-container-highest);
+}
+
+.btn-mapping-details:last-child {
+  border-bottom: none;
+}
+
+.btn-mapping-summary {
+  cursor: pointer;
+  list-style: none;
+  border-bottom: none;
+}
+
+.btn-summary-badge {
+  padding: 2px 8px;
+  border-radius: 8px;
+  background: var(--surface-container);
+  border: 1px solid var(--outline-variant);
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.btn-action-check-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 4px 10px;
+  padding: 6px 8px 10px 8px;
+  background: var(--surface-container-low, rgba(255, 255, 255, 0.03));
+  border-radius: 8px;
+  margin-bottom: 6px;
+}
+
+.btn-action-check {
+  margin: 0 !important;
+}

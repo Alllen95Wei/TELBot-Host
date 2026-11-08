@@ -10,45 +10,58 @@
   <script defer src="/static/app.js"></script>
 </head>
 <body class="dark">
-  <main class="responsive max">
+  <main class="responsive max dashboard-main">
     <!-- ===================================================================
          Top Status & Quick Actions Bar
          =================================================================== -->
     <article class="round border topbar-card">
       <div class="row wrap space-between middle-align">
-        <div class="row middle-align">
-          <i class="extra primary-text">smart_toy</i>
+        <div class="row middle-align" style="gap: 8px;">
+          <i class=" primary-text">smart_toy</i>
           <div>
-            <h5 class="no-margin">TELBot Operator Console</h5>
+            <h6 class="no-margin bold">TELBot Operator Console</h6>
             <small class="mono" id="host-origin-label">Host Control &amp; WebHID Teleop</small>
           </div>
         </div>
 
         <!-- Status Chips -->
-        <div class="row wrap">
-          <span class="chip" id="ws-status-chip">
+        <div class="row wrap" style="gap: 6px;">
+          <span class="chip small" id="ws-status-chip">
             <i id="ws-status-icon">sync_problem</i>
             <span id="ws-status-text">WS: Connecting</span>
           </span>
 
-          <span class="chip" id="estop-status-chip">
+          <span class="chip small" id="estop-status-chip">
             <i id="estop-status-icon">verified_user</i>
             <span id="estop-status-text">E-Stop: Normal</span>
           </span>
 
-          <span class="chip">
+          <span class="chip small" id="hid-status-chip" title="Click to open Gamepad Status & Mapping">
+            <i id="hid-status-icon">sports_esports</i>
+            <span id="hid-status-text">HID: Disconnected</span>
+          </span>
+
+          <span class="chip small">
             <i>swap_vert</i>
             <span class="mono" id="uart-stats-text">TX: 0 | RX: 0</span>
           </span>
 
-          <span class="chip">
+          <span class="chip small" title="Current Shooter Speed Output %">
             <i>speed</i>
             <span class="mono" id="battery-text">80%</span>
           </span>
         </div>
 
-        <!-- Global Controls -->
-        <div class="row wrap">
+        <!-- Global Controls & Modal Triggers -->
+        <div class="row wrap" style="gap: 6px;">
+          <button class="button small border round" id="open-controller-modal-btn" title="Open WebHID Controller Status, Mapping & Tuning">
+            <i>sports_esports</i>
+            <span>Gamepad &amp; Tuning</span>
+          </button>
+          <button class="button small border round" id="open-simulator-modal-btn" title="Open Sensor & Vision Simulator">
+            <i>science</i>
+            <span>Simulator</span>
+          </button>
           <a class="button small border round" href="/ca.crt" download="telbot-ca.crt" title="Download TELBot Root CA Certificate">
             <i>verified</i>
             <span>Root CA</span>
@@ -80,12 +93,12 @@
     </div>
 
     <!-- Insecure Context / WebHID Availability Warning (Hidden on HTTPS/localhost) -->
-    <article id="webhid-warning-card" class="round border error-container" style="display: none; margin-bottom: 12px;">
+    <article id="webhid-warning-card" class="round border error-container" style="display: none; margin-bottom: 8px; padding: 8px 12px;">
       <div class="row middle-align">
         <i>security</i>
         <div>
           <h6 class="no-margin">WebHID Requires HTTPS or Localhost</h6>
-          <p class="no-margin">
+          <p class="no-margin small-text">
             <code>navigator.hid</code> is unavailable on this origin. Please open
             <a id="https-redirect-link" class="underline bold" href="#">the HTTPS URL</a>
             or enable <code>chrome://flags/#unsafely-treat-insecure-origin-as-secure</code>.
@@ -100,8 +113,8 @@
     <article class="round border match-card">
       <div class="row wrap space-between middle-align">
         <!-- Match State & Status Message -->
-        <div class="row middle-align">
-          <i class="extra primary-text" id="match-icon">timer</i>
+        <div class="row middle-align" style="gap: 8px;">
+          <i class="primary-text" id="match-icon">timer</i>
           <div>
             <div class="row middle-align" style="gap: 8px;">
               <h6 class="no-margin bold">Match Phase &amp; Timers</h6>
@@ -115,17 +128,17 @@
         </div>
 
         <!-- Big Countdown Timer Display -->
-        <div class="row middle-align center-align" style="gap: 16px;">
-          <div>
+        <div class="row middle-align center-align" style="gap: 12px;">
+          <div style="text-align: center;">
             <div class="mono match-timer-display" id="match-timer-display">00:00</div>
-            <div class="row center-align small-text mono" style="opacity: 0.8; margin: 0;">
+            <div class="row center-align small-text mono" style="opacity: 0.8; margin: 0; font-size: 0.7rem;">
               <span id="match-phase-label">TIME REMAINING</span>
             </div>
           </div>
         </div>
 
         <!-- Operator Action Buttons -->
-        <div class="row wrap middle-align">
+        <div class="row wrap middle-align" style="gap: 6px;">
           <button class="button small border round" id="match-start-auto-btn" title="Start Autonomous (1:00) - Controllers Locked">
             <i>smart_toy</i>
             <span>Start Auto (1:00)</span>
@@ -150,22 +163,22 @@
     </article>
 
     <!-- ===================================================================
-         Main 2-Column Responsive Grid
+         Main 2-Column Single-Screen Dashboard Grid (Fits without scrolling)
          =================================================================== -->
-    <div class="grid">
+    <div class="grid dashboard-grid">
       <!-- =================================================================
-           LEFT COLUMN: Real-Time Video, WebHID Controller & Command Telemetry
+           LEFT COLUMN: Real-Time Camera Stream & Outgoing Command Telemetry
            ================================================================= -->
-      <div class="s12 m12 l6">
+      <div class="s12 m12 l6 dashboard-col">
         <!-- Section 1: Real-Time Video Feed -->
-        <article class="round border">
+        <article class="round border compact-card">
           <div class="row wrap space-between middle-align">
-            <div class="row middle-align">
+            <div class="row middle-align" style="gap: 6px;">
               <i class="primary-text">videocam</i>
               <h6 class="no-margin">Real-Time Camera Stream</h6>
             </div>
 
-            <div class="row wrap">
+            <div class="row wrap" style="gap: 4px;">
               <span class="chip small" id="cam-online-chip">
                 <i id="cam-online-icon">sensors_off</i>
                 <span id="cam-online-text">Offline</span>
@@ -175,7 +188,7 @@
             </div>
           </div>
 
-          <div class="small-space"></div>
+          <div class="tiny-space"></div>
 
           <!-- 16:9 Stream Container -->
           <div class="video-container">
@@ -188,24 +201,26 @@
 
             <!-- Offline Placeholder -->
             <div id="video-offline-overlay" class="video-offline-overlay">
-              <i class="extra">videocam_off</i>
+              <i class="large">videocam_off</i>
               <h6 class="no-margin">Camera Stream Unavailable</h6>
               <p class="no-margin small-text">
                 Start the video server on the Pi with <code>./video_server/video_server.py</code>, then click Reload.
               </p>
             </div>
           </div>
-          
+
+          <div class="tiny-space"></div>
+
           <!-- Video Controls Row -->
           <div class="row wrap space-between middle-align">
-            <div class="row wrap middle-align">
+            <div class="row wrap middle-align" style="gap: 8px;">
               <label class="switch icon">
                 <input type="checkbox" id="crosshair-toggle" checked />
                 <span><i>my_location</i></span>
               </label>
-              <span>Crosshair</span>
+              <span class="small-text">Crosshair</span>
 
-              <div class="field small border round no-margin" style="width: 230px;">
+              <div class="field small border round no-margin" style="width: 210px;">
                 <select id="video-source-mode">
                   <option value="proxy" selected>HTTPS Proxy (/api/video/stream)</option>
                   <option value="direct">Direct uStreamer (:8001/stream)</option>
@@ -214,182 +229,72 @@
               </div>
             </div>
 
-            <div class="row wrap">
+            <div class="row wrap" style="gap: 6px;">
               <a class="button small border round" id="snapshot-btn" href="/api/video/snapshot" target="_blank">
                 <i>photo_camera</i>
                 <span>Snapshot</span>
               </a>
               <button class="button small primary round" id="video-reload-btn">
                 <i>refresh</i>
-                <span>Reload Stream</span>
+                <span>Reload</span>
               </button>
             </div>
           </div>
         </article>
 
-        <!-- Section 2: WebHID Controller Status (moved to left column) -->
-        <article class="round border">
+        <!-- Section 2: Outgoing Robot Command Telemetry -->
+        <article class="round border compact-card">
           <div class="row wrap space-between middle-align">
-            <div class="row middle-align">
-              <i class="primary-text">sports_esports</i>
-              <div>
-                <h6 class="no-margin">WebHID Controller Status</h6>
-                <small class="mono" id="connected-device-text">Disconnected (Logitech F310)</small>
-              </div>
-            </div>
-
-            <div class="row wrap">
-              <button class="button small primary round" id="connect-btn">
-                <i>usb</i>
-                <span>Connect HID</span>
-              </button>
-              <button class="button small border round" id="forget-btn" disabled>
-                <i>link_off</i>
-                <span>Forget</span>
-              </button>
-            </div>
-          </div>
-
-          <div class="small-space"></div>
-
-          <!-- Dual Stick Visualizers -->
-          <div class="grid">
-            <div class="s6">
-              <div class="stick-card">
-                <span class="small-text bold">Left Stick (B1 / B3)</span>
-                <div class="stick-pad">
-                  <div class="stick-axis-x"></div>
-                  <div class="stick-axis-y"></div>
-                  <div class="stick-dot" id="left-stick-dot"></div>
-                </div>
-                <span class="mono small-text" id="left-stick-text">X: 0.0% | Y: 0.0%</span>
-              </div>
-            </div>
-
-            <div class="s6">
-              <div class="stick-card">
-                <span class="small-text bold">Right Stick (B5 / B7)</span>
-                <div class="stick-pad">
-                  <div class="stick-axis-x"></div>
-                  <div class="stick-axis-y"></div>
-                  <div class="stick-dot" id="right-stick-dot"></div>
-                </div>
-                <span class="mono small-text" id="right-stick-text">X: 0.0% | Y: 0.0%</span>
-              </div>
-            </div>
-          </div>
-
-          <div class="small-space"></div>
-
-          <!-- Triggers (Byte 8 & Byte 9) -->
-          <div class="grid">
-            <div class="s6">
-              <div class="row space-between small-text">
-                <span>Axis B8 (Trigger)</span>
-                <span class="mono" id="axis-b8-text">0.0%</span>
-              </div>
-              <progress id="axis-b8-bar" value="0" max="100"></progress>
-            </div>
-            <div class="s6">
-              <div class="row space-between small-text">
-                <span>Axis B9 (Trigger)</span>
-                <span class="mono" id="axis-b9-text">0.0%</span>
-              </div>
-              <progress id="axis-b9-bar" value="50" max="100"></progress>
-            </div>
-          </div>
-
-          <div class="small-space"></div>
-
-          <!-- 8 F310 Buttons Matrix -->
-          <div class="small-text bold" style="margin-bottom: 6px;">Buttons (Byte 10)</div>
-          <div class="btn-grid" id="f310-btn-grid">
-            <!-- Populated dynamically with A, B, X, Y, LB, RB, Back, Start -->
-          </div>
-
-          <div class="small-space"></div>
-
-          <!-- Collapsible Raw HID Report Table (Exact PoC table) -->
-          <details>
-            <summary class="small-text bold" style="cursor: pointer;">
-              Raw HID Report Inspector (14 Bytes)
-            </summary>
-            <div class="raw-table-wrap">
-              <table id="report-table" class="report-table mono">
-                <thead>
-                  <tr id="report-table-idx">
-                    <th>#</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr id="report-table-raw">
-                    <td>RAW</td>
-                  </tr>
-                  <tr id="report-table-percnt">
-                    <td>%</td>
-                  </tr>
-                  <tr id="report-table-btn">
-                    <td>BTN</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </details>
-        </article>
-
-        <!-- Section 3: Outgoing Robot Command Telemetry -->
-        <article class="round border">
-          <div class="row wrap space-between middle-align">
-            <div class="row middle-align">
+            <div class="row middle-align" style="gap: 6px;">
               <i class="primary-text">settings_input_antenna</i>
               <h6 class="no-margin">Live Robot Control Output (/ws/control)</h6>
             </div>
 
-            <div class="row middle-align">
+            <div class="row middle-align" style="gap: 8px;">
               <label class="switch">
                 <input type="checkbox" id="control-armed-toggle" checked />
                 <span></span>
               </label>
-              <span id="control-armed-label" class="bold">Control Armed (25 Hz)</span>
+              <span id="control-armed-label" class="small-text bold">Control Armed (25 Hz)</span>
             </div>
           </div>
 
-          <div class="small-space"></div>
+          <div class="tiny-space"></div>
 
-          <div class="grid">
-            <div class="s4">
-              <div class="cmd-metric">
-                <div class="label">Chassis VX (Fwd/Back)</div>
+          <div class="grid compact-metric-grid">
+            <div class="s4 m2">
+              <div class="cmd-metric compact">
+                <div class="label">VX (Fwd)</div>
                 <div class="value mono" id="cmd-vx">0</div>
               </div>
             </div>
-            <div class="s4">
-              <div class="cmd-metric">
-                <div class="label">Chassis VY (Strafe)</div>
+            <div class="s4 m2">
+              <div class="cmd-metric compact">
+                <div class="label">VY (Strafe)</div>
                 <div class="value mono" id="cmd-vy">0</div>
               </div>
             </div>
-            <div class="s4">
-              <div class="cmd-metric">
-                <div class="label">Chassis Omega (Turn)</div>
+            <div class="s4 m2">
+              <div class="cmd-metric compact">
+                <div class="label">Omega (Turn)</div>
                 <div class="value mono" id="cmd-omega">0</div>
               </div>
             </div>
-            <div class="s4">
-              <div class="cmd-metric">
-                <div class="label">Shooter Flywheel</div>
+            <div class="s4 m2">
+              <div class="cmd-metric compact">
+                <div class="label">Flywheel Cmd</div>
                 <div class="value mono" id="cmd-flywheel">0</div>
               </div>
             </div>
-            <div class="s4">
-              <div class="cmd-metric">
-                <div class="label">Shooter Pitch Angle</div>
+            <div class="s4 m2">
+              <div class="cmd-metric compact">
+                <div class="label">Pitch Stepper</div>
                 <div class="value mono" id="cmd-angle">OFF</div>
               </div>
             </div>
-            <div class="s4">
-              <div class="cmd-metric">
-                <div class="label">Conveyor (Trig / Spin)</div>
+            <div class="s4 m2">
+              <div class="cmd-metric compact">
+                <div class="label">Conveyor</div>
                 <div class="value mono" id="cmd-conveyor">0 | OFF</div>
               </div>
             </div>
@@ -398,227 +303,495 @@
       </div>
 
       <!-- =================================================================
-           RIGHT COLUMN: Live 2D Field Pose Map & Controller Mapping
+           RIGHT COLUMN: Shooter & Aiming Sensor Telemetry + 2D Field Pose Map
            ================================================================= -->
-      <div class="s12 m12 l6">
-        <!-- Section 4: Live 2D Field Pose Map (400cm x 500cm, right of camera) -->
-        <article class="round border">
+      <div class="s12 m12 l6 dashboard-col">
+        <!-- Section 3: NEW Sensor & Shooter Telemetry Block (Visible without scrolling) -->
+        <article class="round border compact-card sensor-telemetry-card">
           <div class="row wrap space-between middle-align">
-            <div class="row middle-align">
-              <i class="primary-text">explore</i>
+            <div class="row middle-align" style="gap: 6px;">
+              <i class="primary-text">speed</i>
               <div>
-                <h6 class="no-margin">Live 2D Field Pose Map (400 &times; 500 cm)</h6>
+                <h6 class="no-margin">Shooter &amp; Aiming Sensor Telemetry</h6>
               </div>
             </div>
 
-            <div class="row wrap">
+            <!-- Auto (Distance) vs Manual Speed Mode Controls -->
+            <div class="row wrap middle-align" style="gap: 6px;">
+              <span class="chip small" id="shooter-mode-chip">
+                <i id="shooter-mode-icon">hdr_auto</i>
+                <span id="shooter-mode-text">Mode: Auto (Dist)</span>
+              </span>
+              <div class="row no-space">
+                <button class="button small left-round primary" id="shooter-mode-auto-btn" title="Calculate Target RPM automatically from distance to goal">
+                  <span>Auto</span>
+                </button>
+                <button class="button small right-round border" id="shooter-mode-manual-btn" title="Use manual slider / D-Pad setpoint">
+                  <span>Manual</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div class="tiny-space"></div>
+
+          <!-- 6 Primary Shooter & Aiming Sensor Cards -->
+          <div class="grid compact-metric-grid">
+            <!-- 1. Target RPM -->
+            <div class="s6 m4">
+              <div class="cmd-metric sensor-box highlight-target">
+                <div class="row space-between middle-align">
+                  <span class="label">Target Flywheel RPM</span>
+                  <span class="mono tiny-badge" id="sensor-target-duty-badge">Cmd: 800</span>
+                </div>
+                <div class="value mono primary-text" id="sensor-target-rpm">4400 RPM</div>
+                <div class="sub-label mono" id="sensor-target-rpm-sub">Setpoint (0–5500 RPM)</div>
+              </div>
+            </div>
+
+            <!-- 2. Upper Measured RPM -->
+            <div class="s6 m4">
+              <div class="cmd-metric sensor-box">
+                <div class="row space-between middle-align">
+                  <span class="label">Upper Flywheel RPM</span>
+                  <span class="mono tiny-badge" id="sensor-upper-status-badge">Open-Loop</span>
+                </div>
+                <div class="value mono" id="sensor-upper-rpm">---- RPM</div>
+                <div class="sub-label mono" id="sensor-upper-rpm-sub">Awaiting ESP32 RPM</div>
+              </div>
+            </div>
+
+            <!-- 3. Lower Measured RPM -->
+            <div class="s6 m4">
+              <div class="cmd-metric sensor-box">
+                <div class="row space-between middle-align">
+                  <span class="label">Lower Flywheel RPM</span>
+                  <span class="mono tiny-badge" id="sensor-lower-status-badge">Open-Loop</span>
+                </div>
+                <div class="value mono" id="sensor-lower-rpm">---- RPM</div>
+                <div class="sub-label mono" id="sensor-lower-rpm-sub">Awaiting ESP32 RPM</div>
+              </div>
+            </div>
+
+            <!-- 4. Shooter Pitch Angle -->
+            <div class="s6 m4">
+              <div class="cmd-metric sensor-box">
+                <div class="row space-between middle-align">
+                  <span class="label">Shooter Pitch Angle</span>
+                  <span class="mono tiny-badge" id="sensor-angle-dir-badge">IDLE</span>
+                </div>
+                <div class="value mono" id="sensor-shooter-angle">---.-&deg;</div>
+                <div class="sub-label mono" id="sensor-shooter-angle-sub">Stepper: OFF</div>
+              </div>
+            </div>
+
+            <!-- 5. Distance to Target -->
+            <div class="s6 m4">
+              <div class="cmd-metric sensor-box">
+                <div class="row space-between middle-align">
+                  <span class="label">Distance to Target</span>
+                  <span class="mono tiny-badge" id="sensor-target-col-badge">Goal: Center</span>
+                </div>
+                <div class="value mono" id="sensor-target-dist">---.- cm</div>
+                <div class="sub-label mono" id="sensor-target-aim-sub">Aim Heading: ---.-&deg;</div>
+              </div>
+            </div>
+
+            <!-- 6. Quick Setpoint Adjuster (Inline Slider + Step Buttons) -->
+            <div class="s12 m4">
+              <div class="cmd-metric sensor-box">
+                <div class="row space-between middle-align">
+                  <span class="label">Speed Setpoint</span>
+                  <span class="mono bold small-text" id="inline-shooter-speed-label">800 (80%)</span>
+                </div>
+                <input type="range" id="inline-shooter-speed-slider" min="0" max="1000" step="25" value="800" style="width: 100%; margin: 4px 0;" />
+                <div class="sub-label mono">D-Pad Up/Down or Slider &rarr; Manual</div>
+              </div>
+            </div>
+          </div>
+        </article>
+
+        <!-- Section 4: Live 2D Field Pose Map (400cm x 500cm) -->
+        <article class="round border compact-card">
+          <div class="row wrap space-between middle-align">
+            <div class="row middle-align" style="gap: 6px;">
+              <i class="primary-text">explore</i>
+              <h6 class="no-margin">Live 2D Field Pose Map (400 &times; 500 cm)</h6>
+            </div>
+
+            <div class="row wrap" style="gap: 4px;">
               <span class="chip small" id="pose-status-chip">
                 <i id="pose-status-icon">radar</i>
                 <span id="pose-status-text">Awaiting Sensors</span>
               </span>
+              <span class="chip small vision-chip-searching" id="vision-target-chip" title="Active 1x3 Autonomous Goal Target">
+                <i id="vision-target-icon">center_focus_weak</i>
+                <span id="vision-target-text">1x3: Unlatched</span>
+              </span>
               <button class="button small border round" id="pose-zero-heading-btn" title="Set current heading as 0 deg (facing Top 3x3 Grid)">
                 <i>compass_calibration</i>
-                <span>Zero Heading (0&deg;)</span>
+                <span>Zero 0&deg;</span>
               </button>
               <button class="button small border round" id="pose-reset-btn" title="Clear cached valid LiDAR distances and trail">
                 <i>restart_alt</i>
-                <span>Reset History</span>
+                <span>Reset</span>
               </button>
             </div>
           </div>
-          <div class="grid">
+
+          <div class="tiny-space"></div>
+
+          <div class="grid middle-align">
             <!-- 2D Canvas Column -->
-            <div class="s12 xl6">
+            <div class="s12 m5">
               <div class="field-map-wrap">
                 <canvas id="field-map-canvas" width="400" height="500" title="Click anywhere on field to simulate robot pose"></canvas>
               </div>
-              <div class="row center-align wrap small-text" style="margin-top: 6px; gap: 12px;">
-                <span><span class="legend-dot" style="background: #00e676;"></span>Valid Ray</span>
-                <span><span class="legend-dot" style="background: #ff5252;"></span>Rejected (Obstacle)</span>
-                <span><span class="legend-dot" style="background: #38bdf8;"></span>Robot Pose</span>
-                <span><span class="legend-dot" style="background: #facc15;"></span>Active 1x3 Goal</span>
+              <div class="row center-align wrap small-text" style="margin-top: 4px; gap: 8px; font-size: 0.7rem;">
+                <span><span class="legend-dot" style="background: #00e676;"></span>Valid</span>
+                <span><span class="legend-dot" style="background: #ff5252;"></span>Rejected</span>
+                <span><span class="legend-dot" style="background: #38bdf8;"></span>Robot</span>
+                <span><span class="legend-dot" style="background: #facc15;"></span>1x3 Goal</span>
               </div>
             </div>
 
-            <!-- Numeric Pose & LiDAR Readouts + Test Simulator -->
-            <div class="s12 xl6">
-              <div class="grid">
+            <!-- Numeric Pose & LiDAR Readouts -->
+            <div class="s12 m7">
+              <div class="grid compact-metric-grid">
                 <div class="s4">
-                  <div class="cmd-metric">
+                  <div class="cmd-metric compact">
                     <div class="label">Pose X (L&rarr;R)</div>
                     <div class="value mono" id="pose-x-val">---.- cm</div>
                   </div>
                 </div>
                 <div class="s4">
-                  <div class="cmd-metric">
+                  <div class="cmd-metric compact">
                     <div class="label">Pose Y (B&rarr;T)</div>
                     <div class="value mono" id="pose-y-val">---.- cm</div>
                   </div>
                 </div>
                 <div class="s4">
-                  <div class="cmd-metric">
+                  <div class="cmd-metric compact">
                     <div class="label">Heading (&theta;)</div>
                     <div class="value mono" id="pose-heading-val">---.-&deg;</div>
                   </div>
                 </div>
 
                 <div class="s4">
-                  <div class="cmd-metric">
+                  <div class="cmd-metric compact">
                     <div class="label">Front LiDAR</div>
                     <div class="value mono" id="lidar-front-val">--- cm</div>
                   </div>
                 </div>
                 <div class="s4">
-                  <div class="cmd-metric">
+                  <div class="cmd-metric compact">
                     <div class="label">Left LiDAR</div>
                     <div class="value mono" id="lidar-left-val">--- cm</div>
                   </div>
                 </div>
                 <div class="s4">
-                  <div class="cmd-metric">
+                  <div class="cmd-metric compact">
                     <div class="label">Right LiDAR</div>
                     <div class="value mono" id="lidar-right-val">--- cm</div>
                   </div>
                 </div>
               </div>
 
-              <div class="small-space"></div>
+              <div class="tiny-space"></div>
 
-              <div class="cmd-metric">
+              <div class="cmd-metric compact">
                 <div class="label">Obstacle Rejection &amp; Last Valid Cache</div>
-                <div class="mono small-text" id="pose-validation-detail">
+                <div class="mono small-text" id="pose-validation-detail" style="font-size: 0.75rem;">
                   L/R Status: --- | Cached Valid L: --- cm, R: --- cm
                 </div>
               </div>
 
-              <div class="small-space"></div>
+              <div class="tiny-space"></div>
 
-              <!-- Interactive Sensor / Obstacle Simulator for testing before ESP32 is connected -->
-              <details open>
-                <summary class="small-text bold" style="cursor: pointer;">
-                  Sensor &amp; Obstacle Simulator (Click Map or Drag Sliders)
-                </summary>
-                <div class="small-space"></div>
-                <div class="grid">
-                  <div class="s6">
-                    <label class="small-text">Front: <span class="mono bold" id="sim-f-label">350 cm</span></label>
-                    <input type="range" id="sim-f-slider" min="5" max="500" step="1" value="350" style="width: 100%;" />
-                  </div>
-                  <div class="s6">
-                    <label class="small-text">Heading: <span class="mono bold" id="sim-h-label">0&deg;</span></label>
-                    <input type="range" id="sim-h-slider" min="0" max="359" step="1" value="0" style="width: 100%;" />
-                  </div>
-                  <div class="s6">
-                    <label class="small-text">Left: <span class="mono bold" id="sim-l-label">200 cm</span></label>
-                    <input type="range" id="sim-l-slider" min="5" max="400" step="1" value="200" style="width: 100%;" />
-                  </div>
-                  <div class="s6">
-                    <label class="small-text">Right: <span class="mono bold" id="sim-r-label">200 cm</span></label>
-                    <input type="range" id="sim-r-slider" min="5" max="400" step="1" value="200" style="width: 100%;" />
-                  </div>
-                </div>
-                <div class="row wrap" style="margin-top: 6px;">
-                  <button class="button small primary round" id="sim-send-btn">
-                    <i>send</i>
-                    <span>Send Sensor Reading</span>
-                  </button>
-                  <button class="button small border round" id="sim-obstacle-r-btn" title="Simulate an obstacle suddenly blocking Right LiDAR at 45 cm">
-                    <i>block</i>
-                    <span>Test Right Obstacle</span>
-                  </button>
-                  <button class="button small border round" id="sim-obstacle-l-btn" title="Simulate an obstacle suddenly blocking Left LiDAR at 45 cm">
-                    <i>block</i>
-                    <span>Test Left Obstacle</span>
-                  </button>
-                </div>
-
-                <div class="small-space"></div>
-                <div class="small-text bold" style="margin-bottom: 4px;">Vision 1x3 Active Goal Target (YOLO Simulator)</div>
-                <div class="row wrap" style="gap: 6px;">
-                  <button class="button small border round" id="sim-target-left-btn" title="Simulate YOLO detecting Left column active">
-                    <i>flag</i>
-                    <span>Left (140 cm)</span>
-                  </button>
-                  <button class="button small border round" id="sim-target-center-btn" title="Simulate YOLO detecting Center column active">
-                    <i>flag</i>
-                    <span>Center (200 cm)</span>
-                  </button>
-                  <button class="button small border round" id="sim-target-right-btn" title="Simulate YOLO detecting Right column active">
-                    <i>flag</i>
-                    <span>Right (260 cm)</span>
-                  </button>
-                  <button class="button small border round" id="sim-target-reset-btn" title="Reset vision active target">
-                    <i>clear</i>
-                    <span>Clear Goal</span>
-                  </button>
-                </div>
-              </details>
+              <div class="row wrap space-between middle-align">
+                <span class="small-text" style="opacity: 0.75;">
+                  <i>touch_app</i> Click canvas to quick-place robot pose
+                </span>
+                <button class="button small border round" id="open-sim-inline-btn">
+                  <i>science</i>
+                  <span>Obstacle &amp; YOLO Sim</span>
+                </button>
+              </div>
             </div>
           </div>
-        </article>
-
-        <!-- Section 5: Configurable Axis & Button Mapping -->
-        <article class="round border">
-          <div class="row wrap space-between middle-align">
-            <div class="row middle-align">
-              <i class="primary-text">tune</i>
-              <h6 class="no-margin">Controller Mapping &amp; Tuning</h6>
-            </div>
-            <button class="button small border round" id="reset-mapping-btn" title="Restore Default Mapping">
-              <i>restart_alt</i>
-              <span>Reset Defaults</span>
-            </button>
-          </div>
-
-          <div class="small-space"></div>
-
-          <!-- Tuning Sliders -->
-          <div class="grid">
-            <div class="s6">
-              <label class="small-text">Stick Deadzone: <span class="mono bold" id="deadzone-val-label">8%</span></label>
-              <input type="range" id="deadzone-slider" min="0" max="25" step="1" value="8" style="width: 100%;" />
-            </div>
-            <div class="s6">
-              <label class="small-text">Drive Speed Scale: <span class="mono bold" id="speed-scale-val-label">100%</span></label>
-              <input type="range" id="speed-scale-slider" min="10" max="100" step="5" value="100" style="width: 100%;" />
-            </div>
-            <div class="s6">
-              <label class="small-text">Shooter Speed: <span class="mono bold" id="shooter-speed-val-label">800</span></label>
-              <input type="range" id="shooter-speed-slider" min="100" max="1000" step="50" value="800" style="width: 100%;" />
-            </div>
-            <div class="s6">
-              <label class="small-text">Conveyor Speed: <span class="mono bold" id="conveyor-speed-val-label">700</span></label>
-              <input type="range" id="conveyor-speed-slider" min="-1000" max="1000" step="50" value="700" style="width: 100%;" />
-            </div>
-          </div>
-
-          <div class="small-space"></div>
-
-          <!-- Axis Assignment -->
-          <details open>
-            <summary class="small-text bold" style="cursor: pointer; margin-bottom: 6px;">
-              Analog Axis Mapping
-            </summary>
-            <div id="axis-mapping-container">
-              <!-- Populated by app.js -->
-            </div>
-          </details>
-
-          <div class="small-space"></div>
-
-          <!-- Button Assignment -->
-          <details open>
-            <summary class="small-text bold" style="cursor: pointer; margin-bottom: 6px;">
-              Button Action Mapping (A, B, X, Y, LB, RB, Back, Start)
-            </summary>
-            <div id="button-mapping-container">
-              <!-- Populated by app.js -->
-            </div>
-          </details>
         </article>
       </div>
     </div>
+
+    <!-- ===================================================================
+         MODAL 1: WebHID Controller Status, Mapping & Tuning
+         =================================================================== -->
+    <dialog class="modal round border large-modal" id="controller-modal">
+      <div class="row space-between middle-align modal-header">
+        <div class="row middle-align" style="gap: 8px;">
+          <i class="primary-text">sports_esports</i>
+          <h5 class="no-margin">Gamepad Status, Mapping &amp; Tuning</h5>
+        </div>
+        <button class="button circle transparent" id="close-controller-modal-btn" title="Close Modal">
+          <i>close</i>
+        </button>
+      </div>
+
+      <div class="small-space"></div>
+
+      <div class="grid">
+        <!-- Left Half of Modal: WebHID Controller Status -->
+        <div class="s12 l6">
+          <article class="round border">
+            <div class="row wrap space-between middle-align">
+              <div class="row middle-align">
+                <i class="primary-text">usb</i>
+                <div>
+                  <h6 class="no-margin">WebHID Controller Status</h6>
+                  <small class="mono" id="connected-device-text">Disconnected (Logitech F310)</small>
+                </div>
+              </div>
+
+              <div class="row wrap">
+                <button class="button small primary round" id="connect-btn">
+                  <i>usb</i>
+                  <span>Connect HID</span>
+                </button>
+                <button class="button small border round" id="forget-btn" disabled>
+                  <i>link_off</i>
+                  <span>Forget</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="small-space"></div>
+
+            <!-- Dual Stick Visualizers -->
+            <div class="grid">
+              <div class="s6">
+                <div class="stick-card">
+                  <span class="small-text bold">Left Stick (B1 / B3)</span>
+                  <div class="stick-pad">
+                    <div class="stick-axis-x"></div>
+                    <div class="stick-axis-y"></div>
+                    <div class="stick-dot" id="left-stick-dot"></div>
+                  </div>
+                  <span class="mono small-text" id="left-stick-text">X: 0.0% | Y: 0.0%</span>
+                </div>
+              </div>
+
+              <div class="s6">
+                <div class="stick-card">
+                  <span class="small-text bold">Right Stick (B5 / B7)</span>
+                  <div class="stick-pad">
+                    <div class="stick-axis-x"></div>
+                    <div class="stick-axis-y"></div>
+                    <div class="stick-dot" id="right-stick-dot"></div>
+                  </div>
+                  <span class="mono small-text" id="right-stick-text">X: 0.0% | Y: 0.0%</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="small-space"></div>
+
+            <!-- Triggers (Byte 8 & Byte 9) -->
+            <div class="grid">
+              <div class="s6">
+                <div class="row space-between small-text">
+                  <span>Axis B8 (Trigger)</span>
+                  <span class="mono" id="axis-b8-text">0.0%</span>
+                </div>
+                <progress id="axis-b8-bar" value="0" max="100"></progress>
+              </div>
+              <div class="s6">
+                <div class="row space-between small-text">
+                  <span>Axis B9 (Trigger)</span>
+                  <span class="mono" id="axis-b9-text">0.0%</span>
+                </div>
+                <progress id="axis-b9-bar" value="50" max="100"></progress>
+              </div>
+            </div>
+
+            <div class="small-space"></div>
+
+            <!-- 8 F310 Buttons Matrix -->
+            <div class="small-text bold" style="margin-bottom: 6px;">Buttons (Byte 10)</div>
+            <div class="btn-grid" id="f310-btn-grid">
+              <!-- Populated dynamically with A, B, X, Y, LB, RB, Back, Start -->
+            </div>
+
+            <div class="small-space"></div>
+
+            <!-- Collapsible Raw HID Report Table -->
+            <details>
+              <summary class="small-text bold" style="cursor: pointer;">
+                Raw HID Report Inspector (14 Bytes)
+              </summary>
+              <div class="raw-table-wrap">
+                <table id="report-table" class="report-table mono">
+                  <thead>
+                    <tr id="report-table-idx">
+                      <th>#</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr id="report-table-raw">
+                      <td>RAW</td>
+                    </tr>
+                    <tr id="report-table-percnt">
+                      <td>%</td>
+                    </tr>
+                    <tr id="report-table-btn">
+                      <td>BTN</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </details>
+          </article>
+        </div>
+
+        <!-- Right Half of Modal: Configurable Axis & Button Mapping -->
+        <div class="s12 l6">
+          <article class="round border">
+            <div class="row wrap space-between middle-align">
+              <div class="row middle-align">
+                <i class="primary-text">tune</i>
+                <h6 class="no-margin">Controller Mapping &amp; Tuning</h6>
+              </div>
+              <button class="button small border round" id="reset-mapping-btn" title="Restore Default Mapping">
+                <i>restart_alt</i>
+                <span>Reset Defaults</span>
+              </button>
+            </div>
+
+            <div class="small-space"></div>
+
+            <!-- Tuning Sliders -->
+            <div class="grid">
+              <div class="s6">
+                <label class="small-text">Stick Deadzone: <span class="mono bold" id="deadzone-val-label">8%</span></label>
+                <input type="range" id="deadzone-slider" min="0" max="25" step="1" value="8" style="width: 100%;" />
+              </div>
+              <div class="s6">
+                <label class="small-text">Drive Speed Scale: <span class="mono bold" id="speed-scale-val-label">100%</span></label>
+                <input type="range" id="speed-scale-slider" min="10" max="100" step="5" value="100" style="width: 100%;" />
+              </div>
+              <div class="s6">
+                <label class="small-text">Shooter Speed: <span class="mono bold" id="shooter-speed-val-label">800</span></label>
+                <input type="range" id="shooter-speed-slider" min="0" max="1000" step="25" value="800" style="width: 100%;" />
+              </div>
+              <div class="s6">
+                <label class="small-text">Conveyor Speed: <span class="mono bold" id="conveyor-speed-val-label">700</span></label>
+                <input type="range" id="conveyor-speed-slider" min="-1000" max="1000" step="50" value="700" style="width: 100%;" />
+              </div>
+            </div>
+
+            <div class="small-space"></div>
+
+            <!-- Axis Assignment -->
+            <details open>
+              <summary class="small-text bold" style="cursor: pointer; margin-bottom: 6px;">
+                Analog Axis Mapping
+              </summary>
+              <div id="axis-mapping-container">
+                <!-- Populated by app.js -->
+              </div>
+            </details>
+
+            <div class="small-space"></div>
+
+            <!-- Button Assignment -->
+            <details open>
+              <summary class="small-text bold" style="cursor: pointer; margin-bottom: 6px;">
+                Button Action Mapping (A, B, X, Y, LB, RB, Back, Start)
+              </summary>
+              <div id="button-mapping-container">
+                <!-- Populated by app.js -->
+              </div>
+            </details>
+          </article>
+        </div>
+      </div>
+    </dialog>
+
+    <!-- ===================================================================
+         MODAL 2: Sensor, Obstacle & Vision Simulator
+         =================================================================== -->
+    <dialog class="modal round border medium-modal" id="simulator-modal">
+      <div class="row space-between middle-align modal-header">
+        <div class="row middle-align" style="gap: 8px;">
+          <i class="primary-text">science</i>
+          <h5 class="no-margin">Sensor, Obstacle &amp; Vision Simulator</h5>
+        </div>
+        <button class="button circle transparent" id="close-simulator-modal-btn" title="Close Modal">
+          <i>close</i>
+        </button>
+      </div>
+
+      <div class="small-space"></div>
+
+      <article class="round border">
+        <div class="small-text bold" style="margin-bottom: 8px;">
+          LiDAR Distances &amp; Geomagnetic Heading Simulator
+        </div>
+        <div class="grid">
+          <div class="s6">
+            <label class="small-text">Front: <span class="mono bold" id="sim-f-label">350 cm</span></label>
+            <input type="range" id="sim-f-slider" min="5" max="500" step="1" value="350" style="width: 100%;" />
+          </div>
+          <div class="s6">
+            <label class="small-text">Heading: <span class="mono bold" id="sim-h-label">0&deg;</span></label>
+            <input type="range" id="sim-h-slider" min="0" max="359" step="1" value="0" style="width: 100%;" />
+          </div>
+          <div class="s6">
+            <label class="small-text">Left: <span class="mono bold" id="sim-l-label">200 cm</span></label>
+            <input type="range" id="sim-l-slider" min="5" max="400" step="1" value="200" style="width: 100%;" />
+          </div>
+          <div class="s6">
+            <label class="small-text">Right: <span class="mono bold" id="sim-r-label">200 cm</span></label>
+            <input type="range" id="sim-r-slider" min="5" max="400" step="1" value="200" style="width: 100%;" />
+          </div>
+        </div>
+        <div class="row wrap" style="margin-top: 8px; gap: 6px;">
+          <button class="button small primary round" id="sim-send-btn">
+            <i>send</i>
+            <span>Send Sensor Reading</span>
+          </button>
+          <button class="button small border round" id="sim-obstacle-r-btn" title="Simulate an obstacle suddenly blocking Right LiDAR at 45 cm">
+            <i>block</i>
+            <span>Test Right Obstacle</span>
+          </button>
+          <button class="button small border round" id="sim-obstacle-l-btn" title="Simulate an obstacle suddenly blocking Left LiDAR at 45 cm">
+            <i>block</i>
+            <span>Test Left Obstacle</span>
+          </button>
+        </div>
+
+        <div class="small-space"></div>
+
+        <div class="small-text bold" style="margin-bottom: 6px;">Vision 1x3 Active Goal Target (YOLO Simulator)</div>
+        <div class="row wrap" style="gap: 6px;">
+          <button class="button small border round" id="sim-target-left-btn" title="Simulate YOLO detecting Left column active">
+            <i>flag</i>
+            <span>Left (140 cm)</span>
+          </button>
+          <button class="button small border round" id="sim-target-center-btn" title="Simulate YOLO detecting Center column active">
+            <i>flag</i>
+            <span>Center (200 cm)</span>
+          </button>
+          <button class="button small border round" id="sim-target-right-btn" title="Simulate YOLO detecting Right column active">
+            <i>flag</i>
+            <span>Right (260 cm)</span>
+          </button>
+          <button class="button small border round" id="sim-target-reset-btn" title="Reset vision active target">
+            <i>clear</i>
+            <span>Clear Goal</span>
+          </button>
+        </div>
+      </article>
+    </dialog>
   </main>
 </body>
 </html>
-
