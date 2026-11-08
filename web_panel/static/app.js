@@ -53,13 +53,14 @@ const BUTTON_ACTIONS = [
   { id: "shooter_hold", label: "Shooter Flywheel (Hold)", short: "Shoot (Hold)" },
   { id: "shooter_toggle", label: "Shooter Flywheel (Toggle)", short: "Shoot (Tgl)" },
   { id: "conveyor_trigger_hold", label: "Conveyor Trigger / Feed (Hold)", short: "Feed (Hold)" },
+  { id: "conveyor_spinner_hold", label: "Conveyor Spinner Fwd (Hold)", short: "Spin (Hold)" },
   { id: "conveyor_spinner_toggle", label: "Conveyor Spinner (Toggle)", short: "Spinner (Tgl)" },
   { id: "conveyor_spinner_rev_hold", label: "Conveyor Spinner Reverse (Hold)", short: "Spin Rev" },
   { id: "angle_up_hold", label: "Shooter Angle Up (Hold)", short: "Pitch +" },
   { id: "angle_down_hold", label: "Shooter Angle Down (Hold)", short: "Pitch -" },
-  { id: "angle_disable", label: "Shooter Angle Disable (Release)", short: "Pitch Off" },
+  { id: "angle_disable", label: "Shooter Angle Disable (On Press)", short: "Pitch Off" },
+  { id: "angle_disable_release", label: "Shooter Angle Disable (On Release)", short: "Pitch Off (Rel)" },
   { id: "zero_all", label: "Zero All Latch States", short: "Reset States" },
-  { id: "none", label: "Unassigned (None)", short: "---" },
 ];
 
 const STORAGE_KEY = "telbot_controller_mapping_v1";
@@ -81,14 +82,14 @@ function getDefaultMapping() {
       angle: { source: "byte7", invert: false },
     },
     buttons: {
-      A: "conveyor_trigger_hold",
-      B: "emergency_stop",
-      X: "conveyor_spinner_toggle",
-      Y: "shooter_toggle",
-      LB: "conveyor_spinner_rev_hold",
-      RB: "shooter_hold",
-      Back: "emergency_stop",
-      Start: "zero_all",
+      A: ["conveyor_trigger_hold"],
+      B: ["emergency_stop"],
+      X: ["conveyor_spinner_toggle"],
+      Y: ["shooter_toggle"],
+      LB: ["conveyor_spinner_rev_hold"],
+      RB: ["shooter_hold"],
+      Back: ["emergency_stop"],
+      Start: ["zero_all"],
     },
   };
 }
@@ -191,17 +192,47 @@ document.addEventListener("DOMContentLoaded", async () => {
 // ============================================================================
 // Persistence & Mapping UI
 // ============================================================================
+function normalizeButtonActions(val) {
+  if (Array.isArray(val)) {
+    return val.filter((id) => id && id !== "none");
+  }
+  if (typeof val === "string" && val && val !== "none") {
+    return [val];
+  }
+  return [];
+}
+
+function getButtonActions(btnName) {
+  return normalizeButtonActions(mappingConfig.buttons[btnName]);
+}
+
+function formatButtonActionsSummary(btnName) {
+  const actions = getButtonActions(btnName);
+  if (actions.length === 0) return "---";
+  return actions
+    .map((id) => {
+      const found = BUTTON_ACTIONS.find((a) => a.id === id);
+      return found ? found.short : id;
+    })
+    .join(" + ");
+}
+
 function loadMapping() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return getDefaultMapping();
     const parsed = JSON.parse(raw);
     const def = getDefaultMapping();
+    const rawButtons = { ...def.buttons, ...(parsed.buttons || {}) };
+    const buttons = {};
+    for (const btnName of F310_BUTTONS) {
+      buttons[btnName] = normalizeButtonActions(rawButtons[btnName]);
+    }
     return {
       ...def,
       ...parsed,
       axes: { ...def.axes, ...(parsed.axes || {}) },
-      buttons: { ...def.buttons, ...(parsed.buttons || {}) },
+      buttons,
     };
   } catch (e) {
     return getDefaultMapping();
@@ -235,10 +266,11 @@ function initButtonGridUI() {
 
 function updateButtonGridLabels() {
   for (const btnName of F310_BUTTONS) {
-    const actionId = mappingConfig.buttons[btnName] || "none";
-    const found = BUTTON_ACTIONS.find((a) => a.id === actionId);
+    const summary = formatButtonActionsSummary(btnName);
     const el = document.getElementById(`btn-pill-action-${btnName}`);
-    if (el) el.textContent = found ? found.short : "---";
+    if (el) el.textContent = summary;
+    const summaryEl = document.getElementById(`map-btn-summary-${btnName}`);
+    if (summaryEl) summaryEl.textContent = summary;
   }
 }
 
@@ -315,30 +347,43 @@ function initMappingUI() {
     });
   }
 
-  // Button Rows
+  // Button Rows (Multi-select checkboxes per button)
   const btnContainer = document.getElementById("button-mapping-container");
   btnContainer.innerHTML = "";
   for (const btnName of F310_BUTTONS) {
-    const currentAction = mappingConfig.buttons[btnName] || "none";
-    const row = document.createElement("div");
-    row.className = "mapping-row";
+    const currentActions = getButtonActions(btnName);
+    const details = document.createElement("details");
+    details.className = "btn-mapping-details";
 
-    const optionsHtml = BUTTON_ACTIONS.map(
-      (a) => `<option value="${a.id}" ${currentAction === a.id ? "selected" : ""}>${a.label}</option>`
-    ).join("");
+    const checkboxesHtml = BUTTON_ACTIONS.map((a) => {
+      const checked = currentActions.includes(a.id) ? "checked" : "";
+      return `
+        <label class="checkbox small-text btn-action-check">
+          <input type="checkbox" data-btn="${btnName}" value="${a.id}" ${checked} />
+          <span>${a.label}</span>
+        </label>
+      `;
+    }).join("");
 
-    row.innerHTML = `
-      <span class="mono bold small-text">Button ${btnName}</span>
-      <div class="field small border round no-margin" style="width: 235px;">
-        <select id="map-btn-${btnName}">${optionsHtml}</select>
-        <i>arrow_drop_down</i>
+    details.innerHTML = `
+      <summary class="mapping-row btn-mapping-summary">
+        <span class="mono bold small-text">Button ${btnName}</span>
+        <span class="mono small-text btn-summary-badge" id="map-btn-summary-${btnName}">${formatButtonActionsSummary(btnName)}</span>
+      </summary>
+      <div class="btn-action-check-grid" id="map-btn-grid-${btnName}">
+        ${checkboxesHtml}
       </div>
     `;
-    btnContainer.appendChild(row);
+    btnContainer.appendChild(details);
 
-    document.getElementById(`map-btn-${btnName}`).addEventListener("change", (e) => {
-      mappingConfig.buttons[btnName] = e.target.value;
-      saveMapping();
+    details.querySelectorAll(`input[type="checkbox"][data-btn="${btnName}"]`).forEach((cb) => {
+      cb.addEventListener("change", () => {
+        const checkedIds = Array.from(
+          details.querySelectorAll(`input[type="checkbox"][data-btn="${btnName}"]:checked`)
+        ).map((el) => el.value);
+        mappingConfig.buttons[btnName] = checkedIds;
+        saveMapping();
+      });
     });
   }
 
@@ -559,23 +604,34 @@ function processButtonEdges() {
   for (const bName of F310_BUTTONS) {
     const pressedNow = controllerState.buttons[bName];
     const pressedBefore = controllerState.prevButtons[bName];
+    const actions = getButtonActions(bName);
 
     // Rising edge (button just pressed)
     if (pressedNow && !pressedBefore) {
-      const action = mappingConfig.buttons[bName] || "none";
-      if (action === "emergency_stop") {
-        toggleState.shooterActive = false;
-        toggleState.spinnerActive = false;
-        sendEmergencyStop();
-      } else if (action === "shooter_toggle") {
-        toggleState.shooterActive = !toggleState.shooterActive;
-      } else if (action === "conveyor_spinner_toggle") {
-        toggleState.spinnerActive = !toggleState.spinnerActive;
-      } else if (action === "angle_disable") {
-        sendWsJson({ type: "shooter_disable_angle" });
-      } else if (action === "zero_all") {
-        toggleState.shooterActive = false;
-        toggleState.spinnerActive = false;
+      for (const action of actions) {
+        if (action === "emergency_stop") {
+          toggleState.shooterActive = false;
+          toggleState.spinnerActive = false;
+          sendEmergencyStop();
+        } else if (action === "shooter_toggle") {
+          toggleState.shooterActive = !toggleState.shooterActive;
+        } else if (action === "conveyor_spinner_toggle") {
+          toggleState.spinnerActive = !toggleState.spinnerActive;
+        } else if (action === "angle_disable") {
+          sendWsJson({ type: "shooter_disable_angle" });
+        } else if (action === "zero_all") {
+          toggleState.shooterActive = false;
+          toggleState.spinnerActive = false;
+        }
+      }
+    }
+
+    // Falling edge (button just released)
+    if (!pressedNow && pressedBefore) {
+      for (const action of actions) {
+        if (action === "angle_disable_release") {
+          sendWsJson({ type: "shooter_disable_angle" });
+        }
       }
     }
   }
@@ -708,7 +764,7 @@ function evaluateMappedAxis(axisKey, applySpeedScale = true) {
 
 function isActionHeld(actionId) {
   for (const bName of F310_BUTTONS) {
-    if (controllerState.buttons[bName] && mappingConfig.buttons[bName] === actionId) {
+    if (controllerState.buttons[bName] && getButtonActions(bName).includes(actionId)) {
       return true;
     }
   }
@@ -749,9 +805,10 @@ function controlTick() {
   const triggerHeld = controllerState.connected && isActionHeld("conveyor_trigger_hold");
   const trigger = triggerHeld ? mappingConfig.conveyorSpeed : 0;
 
+  const spinFwdHeld = controllerState.connected && isActionHeld("conveyor_spinner_hold");
   const spinRevHeld = controllerState.connected && isActionHeld("conveyor_spinner_rev_hold");
   const spinnerRun =
-    controllerState.connected && (toggleState.spinnerActive || spinRevHeld);
+    controllerState.connected && (toggleState.spinnerActive || spinFwdHeld || spinRevHeld);
   const spinnerReversed = Boolean(spinRevHeld);
 
   // Update UI Telemetry Cards

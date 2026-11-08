@@ -256,6 +256,45 @@ table.report-table td {
   border-bottom: none;
 }
 
+.btn-mapping-details {
+  border-bottom: 1px solid var(--surface-container-highest);
+}
+
+.btn-mapping-details:last-child {
+  border-bottom: none;
+}
+
+.btn-mapping-summary {
+  cursor: pointer;
+  list-style: none;
+  border-bottom: none;
+}
+
+.btn-summary-badge {
+  padding: 2px 8px;
+  border-radius: 8px;
+  background: var(--surface-container);
+  border: 1px solid var(--outline-variant);
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.btn-action-check-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 4px 10px;
+  padding: 6px 8px 10px 8px;
+  background: var(--surface-container-low, rgba(255, 255, 255, 0.03));
+  border-radius: 8px;
+  margin-bottom: 6px;
+}
+
+.btn-action-check {
+  margin: 0 !important;
+}
+
 /* 2D Field Pose Map Canvas */
 .field-map-wrap {
   display: flex;
