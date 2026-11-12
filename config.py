@@ -4,6 +4,13 @@ class UART:
     TIMEOUT = 0.1  # seconds (responsive for RX thread polling)
 
 
+class ESP32:
+    PORT = "/dev/ttyAMA1"
+    BAUD_RATE = 115200
+    TIMEOUT = 0.05  # seconds (responsive for 50 Hz RX thread polling)
+    STALE_TIMEOUT_S = 0.5  # seconds before ESP32 sensor snapshot is marked stale
+
+
 class Server:
     HOST = "0.0.0.0"
     PORT = 8000
@@ -63,6 +70,7 @@ class PoseSensor:
     SPAN_TOLERANCE_CM = 30.0       # Max |x_L - x_R| discrepancy before L/R validation fails
     MAX_RAY_INCIDENCE_DEG = 35.0   # Max angle off wall normal to project a ray onto that wall
     MAX_FRONT_DELTA_CM = 80.0      # Max sudden single-step jump on Front ray before rejecting as obstacle
+    MAX_RIGHT_DELTA_CM = 80.0      # Max sudden single-step jump on Right ray before rejecting as obstacle
 
 
 class Match:

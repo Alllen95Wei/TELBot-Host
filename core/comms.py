@@ -19,6 +19,10 @@ HEADER_SIZE = 6  # MAGIC (2B) + LEN (1B) + SEQ (1B) + CMD (1B) + PART (1B)
 MIN_PACKET_SIZE = HEADER_SIZE + 1  # Header + CRC8 (1B)
 MAX_PAYLOAD_SIZE = 240  # Well within 1-byte length limit (0-255)
 
+ESP32_TELEMETRY_FMT = "<hhhIII"
+ESP32_TELEMETRY_SIZE = 18
+ESP32_INVALID_DIST_MM = 0xFFFFFFFF
+
 
 # ==============================================================================
 # Enums
@@ -310,6 +314,41 @@ class Packet:
         raise ValueError(f"Conveyor payload expected 2, 3, or 4 bytes, got {len(self.payload)}")
 
     # --- Sensor Telemetry (PartType.SENSORS) ---
+    ESP32_TELEMETRY_FMT = "<hhhIII"
+    ESP32_TELEMETRY_SIZE = 18
+    ESP32_INVALID_DIST_MM = 0xFFFFFFFF
+
+    @classmethod
+    def create_esp32_telemetry(
+        cls,
+        upper_rpm: int,
+        lower_rpm: int,
+        heading_deg: int,
+        dist_front_mm: int,
+        dist_right_mm: int,
+        dist_left_mm: int,
+        seq: int = 0,
+    ) -> "Packet":
+        """
+        Packs 18-byte sensor telemetry from ESP32 to Host (<hhhIII):
+          upper_rpm:     int16  upper flywheel speed in RPM
+          lower_rpm:     int16  lower flywheel speed in RPM
+          heading_deg:   int16  geomagnetic heading relative to earth in degrees
+          dist_front_mm: uint32 front LiDAR measured distance in mm (0xFFFFFFFF = invalid)
+          dist_right_mm: uint32 right LiDAR measured distance in mm (0xFFFFFFFF = invalid)
+          dist_left_mm:  uint32 left LiDAR measured distance in mm (0xFFFFFFFF = invalid)
+        """
+        payload = struct.pack(
+            cls.ESP32_TELEMETRY_FMT,
+            int(upper_rpm),
+            int(lower_rpm),
+            int(heading_deg),
+            int(dist_front_mm) & 0xFFFFFFFF,
+            int(dist_right_mm) & 0xFFFFFFFF,
+            int(dist_left_mm) & 0xFFFFFFFF,
+        )
+        return cls(cmd=CmdType.TELEMETRY, part=PartType.SENSORS, payload=payload, seq=seq)
+
     @classmethod
     def create_telemetry(
         cls, battery_mv: int, enc_lf: int = 0, enc_rf: int = 0, status_flags: int = 0, seq: int = 0
@@ -325,17 +364,52 @@ class Packet:
         return cls(cmd=CmdType.TELEMETRY, part=PartType.SENSORS, payload=payload, seq=seq)
 
     def parse_telemetry(self) -> dict:
-        """Unpacks telemetry payload into structured dictionary."""
-        if len(self.payload) != 7:
-            raise ValueError(f"Telemetry payload expected 7 bytes, got {len(self.payload)}")
-        battery_mv, enc_lf, enc_rf, status = struct.unpack("<HhhB", self.payload)
-        return {
-            "battery_mv": battery_mv,
-            "battery_v": round(battery_mv / 1000.0, 2),
-            "enc_lf": enc_lf,
-            "enc_rf": enc_rf,
-            "status_flags": status,
-        }
+        """
+        Unpacks telemetry payload into structured dictionary.
+        Supports:
+          - 18-byte ESP32 sensor frame (<hhhIII):
+              (upper_rpm, lower_rpm, heading_deg, dist_front_mm, dist_right_mm, dist_left_mm)
+          - 7-byte Pico telemetry frame (<HhhB):
+              (battery_mv, enc_lf, enc_rf, status_flags)
+        """
+        if len(self.payload) == self.ESP32_TELEMETRY_SIZE:
+            (
+                upper_rpm,
+                lower_rpm,
+                heading_deg,
+                dist_front_mm,
+                dist_right_mm,
+                dist_left_mm,
+            ) = struct.unpack(self.ESP32_TELEMETRY_FMT, self.payload)
+            front_valid = 0 < dist_front_mm < self.ESP32_INVALID_DIST_MM
+            right_valid = 0 < dist_right_mm < self.ESP32_INVALID_DIST_MM
+            left_valid = 0 < dist_left_mm < self.ESP32_INVALID_DIST_MM
+            return {
+                "source": "esp32",
+                "upper_rpm": int(upper_rpm),
+                "lower_rpm": int(lower_rpm),
+                "heading_deg": int(heading_deg),
+                "dist_front_mm": int(dist_front_mm),
+                "dist_right_mm": int(dist_right_mm),
+                "dist_left_mm": int(dist_left_mm),
+                "dist_front_cm": round(dist_front_mm / 10.0, 1) if front_valid else None,
+                "dist_right_cm": round(dist_right_mm / 10.0, 1) if right_valid else None,
+                "dist_left_cm": round(dist_left_mm / 10.0, 1) if left_valid else None,
+            }
+        if len(self.payload) == 7:
+            battery_mv, enc_lf, enc_rf, status = struct.unpack("<HhhB", self.payload)
+            return {
+                "source": "pico",
+                "battery_mv": battery_mv,
+                "battery_v": round(battery_mv / 1000.0, 2),
+                "enc_lf": enc_lf,
+                "enc_rf": enc_rf,
+                "status_flags": status,
+            }
+        raise ValueError(
+            f"Telemetry payload expected {self.ESP32_TELEMETRY_SIZE} (ESP32) or 7 (Pico) bytes, "
+            f"got {len(self.payload)}"
+        )
 
 
 # ==============================================================================

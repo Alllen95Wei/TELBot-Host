@@ -20,11 +20,22 @@ ROOT_DIR = PANEL_DIR.parent
 sys.path.append(str(ROOT_DIR))
 
 from config import Camera as CameraConfig
+from config import ESP32 as ESP32Config
 from config import Field as FieldConfig
 from config import Server as ServerConfig
 from config import SpecialGrid as SpecialGridConfig
 from config import UART as UARTConfig
-from core import MatchManager, MatchMode, PartType, PoseEstimator, UARTComm, VisionManager, VisionTarget
+from core import (
+    ESP32SensorReceiver,
+    ESP32SensorSnapshot,
+    MatchManager,
+    MatchMode,
+    PartType,
+    PoseEstimator,
+    UARTComm,
+    VisionManager,
+    VisionTarget,
+)
 
 logger = logging.getLogger("TELBot.Server")
 
@@ -39,6 +50,25 @@ uart = UARTComm(
 pose_estimator = PoseEstimator()
 match_manager = MatchManager(on_stop_required=lambda: uart.send_stop())
 vision_manager = VisionManager()
+esp32_receiver = ESP32SensorReceiver(
+    port=ESP32Config.PORT,
+    baudrate=ESP32Config.BAUD_RATE,
+    timeout=ESP32Config.TIMEOUT,
+    stale_timeout_s=ESP32Config.STALE_TIMEOUT_S,
+)
+
+
+def _on_standalone_esp32_frame(snap: ESP32SensorSnapshot) -> None:
+    """Updates PoseEstimator when ESP32SensorReceiver runs inside server.py."""
+    get_pose_estimator().update_from_mm(
+        dist_front_mm=snap.dist_front_mm,
+        dist_right_mm=snap.dist_right_mm,
+        dist_left_mm=snap.dist_left_mm,
+        raw_heading_deg=float(snap.heading_deg),
+    )
+
+
+esp32_receiver.register_callback(_on_standalone_esp32_frame)
 
 
 def set_uart_comm(comm: UARTComm) -> None:
@@ -90,6 +120,52 @@ def get_vision_manager() -> VisionManager:
     return getattr(app.state, "vision_manager", vision_manager)
 
 
+def set_esp32_receiver(receiver: ESP32SensorReceiver) -> None:
+    """Injects an externally managed ESP32SensorReceiver instance (used by main.py)."""
+    global esp32_receiver
+    esp32_receiver = receiver
+    app.state.esp32_receiver = receiver
+
+
+def get_esp32_receiver() -> ESP32SensorReceiver:
+    """Returns the active ESP32SensorReceiver instance."""
+    return getattr(app.state, "esp32_receiver", esp32_receiver)
+
+
+def _build_combined_telemetry() -> Optional[dict]:
+    """
+    Merges latest telemetry from Pico UART and ESP32 Sensor UART into a single
+    dictionary for the Web UI and REST clients.
+    """
+    comm = get_uart_comm()
+    esp32 = get_esp32_receiver()
+    combined: dict = {}
+
+    telem_pkt = comm.latest_telemetry
+    if telem_pkt is not None:
+        try:
+            combined.update(telem_pkt.parse_telemetry())
+        except Exception:
+            combined["raw_hex"] = telem_pkt.payload.hex()
+
+    esp32_snap = esp32.latest_snapshot
+    if esp32_snap is not None:
+        snap_dict = esp32_snap.to_dict(stale_timeout_s=esp32.stale_timeout_s)
+        combined["esp32"] = snap_dict
+        if not snap_dict["stale"]:
+            combined["upper_rpm"] = snap_dict["upper_rpm"]
+            combined["lower_rpm"] = snap_dict["lower_rpm"]
+            combined["heading_deg"] = snap_dict["heading_deg"]
+            combined["dist_front_mm"] = snap_dict["dist_front_mm"]
+            combined["dist_right_mm"] = snap_dict["dist_right_mm"]
+            combined["dist_left_mm"] = snap_dict["dist_left_mm"]
+            combined["dist_front_cm"] = snap_dict["dist_front_cm"]
+            combined["dist_right_cm"] = snap_dict["dist_right_cm"]
+            combined["dist_left_cm"] = snap_dict["dist_left_cm"]
+
+    return combined if combined else None
+
+
 # Active video streaming proxy writers to cleanly tear down on shutdown
 _active_stream_writers: set[asyncio.StreamWriter] = set()
 
@@ -101,8 +177,11 @@ async def lifespan(app: FastAPI):
     when running standalone (skips if already started by main.py).
     """
     comm = get_uart_comm()
+    esp32 = get_esp32_receiver()
     app.state.uart = comm
+    app.state.esp32_receiver = esp32
     managed_internally = False
+    esp32_managed_internally = False
 
     if not comm.is_running:
         logger.info("Initializing UART dual-threaded communication workers (standalone mode)...")
@@ -111,6 +190,13 @@ async def lifespan(app: FastAPI):
             managed_internally = True
         except Exception as e:
             logger.error(f"Failed to start UART worker threads: {e}")
+
+    if not esp32.is_running:
+        try:
+            esp32.start()
+            esp32_managed_internally = True
+        except Exception as e:
+            logger.error(f"Failed to start ESP32 UART receiver: {e}")
 
     yield
 
@@ -121,6 +207,9 @@ async def lifespan(app: FastAPI):
         except Exception:
             pass
     _active_stream_writers.clear()
+
+    if esp32_managed_internally:
+        esp32.stop()
 
     if managed_internally:
         logger.info("Shutting down UART communication workers (standalone mode)...")
@@ -235,9 +324,32 @@ class StopRequest(BaseModel):
 
 class PoseSensorUpdateRequest(BaseModel):
     dist_front_cm: float = Field(..., description="Front LiDAR distance in cm")
-    dist_left_cm: float = Field(..., description="Left LiDAR distance in cm")
     dist_right_cm: float = Field(..., description="Right LiDAR distance in cm")
     raw_heading_deg: float = Field(..., description="Geomagnetic heading in degrees")
+    dist_left_cm: Optional[float] = Field(
+        default=None, description="Optional Left LiDAR distance in cm"
+    )
+    upper_rpm: Optional[int] = Field(
+        default=None, description="Optional simulated upper flywheel speed in RPM"
+    )
+    lower_rpm: Optional[int] = Field(
+        default=None, description="Optional simulated lower flywheel speed in RPM"
+    )
+
+
+class ESP32TelemetrySimulateRequest(BaseModel):
+    upper_rpm: int = Field(default=0, ge=-10000, le=10000, description="Upper flywheel speed (RPM)")
+    lower_rpm: int = Field(default=0, ge=-10000, le=10000, description="Lower flywheel speed (RPM)")
+    heading_deg: int = Field(default=0, ge=-360, le=360, description="Earth-relative heading (deg)")
+    dist_front_mm: int = Field(
+        default=3500, ge=0, le=0xFFFFFFFF, description="Front LiDAR distance (mm)"
+    )
+    dist_right_mm: int = Field(
+        default=2000, ge=0, le=0xFFFFFFFF, description="Right LiDAR distance (mm)"
+    )
+    dist_left_mm: int = Field(
+        default=2000, ge=0, le=0xFFFFFFFF, description="Left LiDAR distance (mm)"
+    )
 
 
 class PoseCalibrateRequest(BaseModel):
@@ -269,25 +381,19 @@ class VisionTargetRequest(BaseModel):
 def get_status():
     """Retrieve communication statistics, E-Stop state, queue depth, match state, vision target, pose, and latest telemetry."""
     comm = get_uart_comm()
+    esp32 = get_esp32_receiver()
     estimator = get_pose_estimator()
     match_mgr = get_match_manager()
     vision_mgr = get_vision_manager()
     stats = comm.get_stats()
-    telemetry = comm.latest_telemetry
-    parsed_telem = None
-
-    if telemetry is not None:
-        try:
-            parsed_telem = telemetry.parse_telemetry()
-        except Exception:
-            parsed_telem = {"raw_hex": telemetry.payload.hex()}
-
+    parsed_telem = _build_combined_telemetry()
     latest_pose = estimator.latest_pose
 
     return {
         "status": "estop" if comm.estop_active else "ok",
         "estop_active": comm.estop_active,
         "stats": stats,
+        "esp32": esp32.get_stats(),
         "match": match_mgr.get_status(),
         "vision": vision_mgr.get_status(),
         "latest_telemetry": parsed_telem,
@@ -387,15 +493,58 @@ def get_pose():
 
 @app.post("/api/pose/update")
 def update_pose(req: PoseSensorUpdateRequest):
-    """Updates the pose estimator with 3 LiDAR distances (cm) and geomagnetic heading (deg)."""
+    """Updates the pose estimator with Front, Right & Left LiDAR distances (cm), geomagnetic heading (deg), and optional simulated RPMs."""
+    if req.upper_rpm is not None or req.lower_rpm is not None:
+        left_mm = (
+            max(0, int(round(req.dist_left_cm * 10.0)))
+            if req.dist_left_cm is not None
+            else 0xFFFFFFFF
+        )
+        snap = get_esp32_receiver().inject_telemetry(
+            upper_rpm=int(req.upper_rpm or 0),
+            lower_rpm=int(req.lower_rpm or 0),
+            heading_deg=int(round(req.raw_heading_deg)),
+            dist_front_mm=max(0, int(round(req.dist_front_cm * 10.0))),
+            dist_right_mm=max(0, int(round(req.dist_right_cm * 10.0))),
+            dist_left_mm=left_mm,
+        )
+        latest_pose = get_pose_estimator().latest_pose
+        return {
+            "status": "ok",
+            "pose": latest_pose.to_dict() if latest_pose is not None else None,
+            "esp32": snap.to_dict(),
+        }
+
     estimator = get_pose_estimator()
     estimate = estimator.update(
         dist_front_cm=req.dist_front_cm,
-        dist_left_cm=req.dist_left_cm,
         dist_right_cm=req.dist_right_cm,
         raw_heading_deg=req.raw_heading_deg,
+        dist_left_cm=req.dist_left_cm,
     )
     return {"status": "ok", "pose": estimate.to_dict()}
+
+
+@app.post("/api/esp32/simulate")
+def simulate_esp32_telemetry(req: ESP32TelemetrySimulateRequest):
+    """
+    Encodes a 25-byte binary ESP32 sensor frame (<hhhIII + CRC8) and feeds it
+    through the ESP32SensorReceiver parser and PoseEstimator pipeline.
+    """
+    snap = get_esp32_receiver().inject_telemetry(
+        upper_rpm=req.upper_rpm,
+        lower_rpm=req.lower_rpm,
+        heading_deg=req.heading_deg,
+        dist_front_mm=req.dist_front_mm,
+        dist_right_mm=req.dist_right_mm,
+        dist_left_mm=req.dist_left_mm,
+    )
+    latest_pose = get_pose_estimator().latest_pose
+    return {
+        "status": "ok",
+        "esp32": snap.to_dict(),
+        "pose": latest_pose.to_dict() if latest_pose is not None else None,
+    }
 
 
 @app.post("/api/pose/calibrate")
@@ -790,14 +939,7 @@ async def websocket_control(websocket: WebSocket):
 
             # Read latest stats, pose & telemetry snapshot to send back to client
             stats = comm.get_stats()
-            telem = comm.latest_telemetry
-            parsed_telem = None
-            if telem:
-                try:
-                    parsed_telem = telem.parse_telemetry()
-                except Exception:
-                    pass
-
+            parsed_telem = _build_combined_telemetry()
             latest_pose = get_pose_estimator().latest_pose
 
             await websocket.send_json({
@@ -806,6 +948,7 @@ async def websocket_control(websocket: WebSocket):
                 "queue_depth": stats["queue_depth"],
                 "tx_packets": stats["tx_packets"],
                 "rx_packets": stats["rx_packets"],
+                "esp32": get_esp32_receiver().get_stats(),
                 "match": match_mgr.get_status(),
                 "vision": get_vision_manager().get_status(),
                 "telemetry": parsed_telem,

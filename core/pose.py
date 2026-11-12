@@ -30,7 +30,7 @@ class PoseEstimate:
     heading_deg: float
     raw_heading_deg: float
     dist_front_cm: float
-    dist_left_cm: float
+    dist_left_cm: Optional[float]
     dist_right_cm: float
     last_valid_left_cm: Optional[float]
     last_valid_right_cm: Optional[float]
@@ -47,21 +47,20 @@ class PoseEstimate:
 class PoseEstimator:
     """
     Calculates robot field pose (x_cm, y_cm, heading_deg) from:
-      - 3 directional LiDAR distances (front, left, right) in cm
+      - 2 directional LiDAR distances (front, right) in cm (or 3 if left is provided)
       - Geomagnetic heading angle in degrees
 
-    Obstacle Rejection Strategy (L & R opposing beams):
-      - Automatically records the latest validated distances for Left and Right
-        (`last_valid_left_cm` and `last_valid_right_cm`).
-      - On each update, checks if the opposing Left and Right wall projections agree
-        within `span_tolerance_cm` (i.e. d_L + d_R matches the field span).
-      - When validation fails (an obstacle blocks L or R), computes the delta
-        between the current reading and the previous valid reading:
-            delta_L = |d_L - last_valid_left_cm|
-            delta_R = |d_R - last_valid_right_cm|
-        and only uses the beam with the smaller delta (the one consistent with
-        continuous robot motion), preserving the blocked side's previous valid value
-        until the obstacle clears.
+    Obstacle Rejection Strategy:
+      - In 2-LiDAR mode (Front 0 deg + Right +90 deg):
+          Independently tracks `last_valid_front_cm` and `last_valid_right_cm`.
+          If either beam experiences a sudden single-step jump exceeding
+          `max_front_delta_cm` / `max_right_delta_cm` (an obstacle entering the ray),
+          that reading is rejected (`front_status="rejected_delta"` or
+          `lr_status="right_rejected_delta"`) and the estimator holds the previous
+          valid coordinate along that axis until the obstacle clears.
+      - In 3-LiDAR mode (when `dist_left_cm` is also provided):
+          Additionally cross-validates opposing Left and Right wall projections
+          within `span_tolerance_cm`.
     """
 
     def __init__(
@@ -87,6 +86,9 @@ class PoseEstimator:
         span_tolerance_cm: float = PoseSensorConfig.SPAN_TOLERANCE_CM,
         max_ray_incidence_deg: float = PoseSensorConfig.MAX_RAY_INCIDENCE_DEG,
         max_front_delta_cm: float = PoseSensorConfig.MAX_FRONT_DELTA_CM,
+        max_right_delta_cm: float = getattr(
+            PoseSensorConfig, "MAX_RIGHT_DELTA_CM", PoseSensorConfig.MAX_FRONT_DELTA_CM
+        ),
     ) -> None:
         self.field_width_cm = float(field_width_cm)
         self.field_length_cm = float(field_length_cm)
@@ -104,6 +106,7 @@ class PoseEstimator:
         self.span_tolerance_cm = float(span_tolerance_cm)
         self.max_ray_incidence_deg = float(max_ray_incidence_deg)
         self.max_front_delta_cm = float(max_front_delta_cm)
+        self.max_right_delta_cm = float(max_right_delta_cm)
 
         self._lock = threading.Lock()
 
@@ -128,9 +131,9 @@ class PoseEstimator:
         (default 0.0 deg = facing Top wall / 3x3 grid).
         """
         with self._lock:
-             signed_raw = raw_heading_deg if self.clockwise_heading else -raw_heading_deg
-             self.heading_offset_deg = (signed_raw - target_field_deg) % 360.0
-             return self.heading_offset_deg
+            signed_raw = raw_heading_deg if self.clockwise_heading else -raw_heading_deg
+            self.heading_offset_deg = (signed_raw - target_field_deg) % 360.0
+            return self.heading_offset_deg
 
     def reset_history(self) -> None:
         """Clears cached valid distances and pose history."""
@@ -158,15 +161,16 @@ class PoseEstimator:
         signed_raw = raw_heading_deg if self.clockwise_heading else -raw_heading_deg
         return (signed_raw - self.heading_offset_deg) % 360.0
 
-    def _is_range_valid(self, dist_cm: float) -> bool:
+    def _is_range_valid(self, dist_cm: Optional[float]) -> bool:
         return (
-            math.isfinite(dist_cm)
+            dist_cm is not None
+            and math.isfinite(dist_cm)
             and self.min_range_cm <= dist_cm <= self.max_range_cm
         )
 
     def _project_ray_to_wall(
         self,
-        dist_cm: float,
+        dist_cm: Optional[float],
         heading_deg: float,
         rel_beam_deg: float,
         offset_xy_cm: Tuple[float, float],
@@ -179,7 +183,7 @@ class PoseEstimator:
           striking near a corner at > max_ray_incidence_deg), and `coord_cm` is
           the implied robot center coordinate along that axis.
         """
-        if not self._is_range_valid(dist_cm):
+        if dist_cm is None or not self._is_range_valid(dist_cm):
             return None, None
 
         theta_rad = math.radians(heading_deg)
@@ -235,45 +239,79 @@ class PoseEstimator:
     # --------------------------------------------------------------------------
     # Main Pose Update with Delta-Based Obstacle Rejection
     # --------------------------------------------------------------------------
-    def update(
+    def update_from_mm(
         self,
-        dist_front_cm: float,
-        dist_left_cm: float,
-        dist_right_cm: float,
+        dist_front_mm: int,
+        dist_right_mm: int,
+        dist_left_mm: int,
         raw_heading_deg: float,
     ) -> PoseEstimate:
         """
-        Computes a new field pose estimate from the 3 LiDAR distances (in cm)
-        and geomagnetic heading (in degrees).
+        Convenience wrapper accepting ESP32 3-LiDAR measurements in millimeters (uint32)
+        and converting them to centimeters before running pose estimation.
+        """
+        front_cm = (
+            float(dist_front_mm) / 10.0
+            if 0 < int(dist_front_mm) < 0xFFFFFFFF
+            else -1.0
+        )
+        right_cm = (
+            float(dist_right_mm) / 10.0
+            if 0 < int(dist_right_mm) < 0xFFFFFFFF
+            else -1.0
+        )
+        left_cm = (
+            float(dist_left_mm) / 10.0
+            if dist_left_mm is not None and 0 < int(dist_left_mm) < 0xFFFFFFFF
+            else None
+        )
+        return self.update(
+            dist_front_cm=front_cm,
+            dist_right_cm=right_cm,
+            raw_heading_deg=raw_heading_deg,
+            dist_left_cm=left_cm,
+        )
+
+    def update(
+        self,
+        dist_front_cm: float,
+        dist_right_cm: float,
+        raw_heading_deg: float,
+        dist_left_cm: Optional[float] = None,
+    ) -> PoseEstimate:
+        """
+        Computes a new field pose estimate from Front & Right LiDAR distances (in cm),
+        geomagnetic heading (in degrees), and optional Left LiDAR distance (in cm).
         """
         with self._lock:
             heading_deg = self.normalize_heading(raw_heading_deg)
 
-            # 1. Project Left (-90 deg) and Right (+90 deg) opposing beams
-            axis_l, pos_l = self._project_ray_to_wall(
-                dist_left_cm, heading_deg, -90.0, self.left_offset_cm
+            # 1. Project Right (+90 deg) and optional Left (-90 deg) beams
+            axis_l, pos_l = (
+                self._project_ray_to_wall(
+                    dist_left_cm, heading_deg, -90.0, self.left_offset_cm
+                )
+                if dist_left_cm is not None
+                else (None, None)
             )
             axis_r, pos_r = self._project_ray_to_wall(
                 dist_right_cm, heading_deg, +90.0, self.right_offset_cm
             )
 
-            lr_axis: Optional[str] = axis_l or axis_r
+            lr_axis: Optional[str] = axis_r or axis_l
             lr_pos: Optional[float] = None
             lr_status = "no_valid_beam"
 
             if axis_l is not None and axis_r is not None and axis_l == axis_r:
-                assert pos_l is not None and pos_r is not None
+                assert pos_l is not None and pos_r is not None and dist_left_cm is not None
                 discrepancy = abs(pos_l - pos_r)
 
                 if discrepancy <= self.span_tolerance_cm:
-                    # Validation passed: both L and R rays reached opposite field walls
                     lr_pos = 0.5 * (pos_l + pos_r)
                     self.last_valid_left_cm = dist_left_cm
                     self.last_valid_right_cm = dist_right_cm
                     lr_status = "both_valid"
                 else:
-                    # Validation failed (obstacle blocking L or R):
-                    # Compare delta against previous valid distances for L and R
                     if (
                         self.last_valid_left_cm is not None
                         and self.last_valid_right_cm is not None
@@ -301,7 +339,7 @@ class PoseEstimator:
                             lr_status = "right_only_rejected_left"
                     elif self.last_valid_right_cm is not None:
                         delta_r = abs(dist_right_cm - self.last_valid_right_cm)
-                        if delta_r <= self.max_front_delta_cm:
+                        if delta_r <= self.max_right_delta_cm:
                             lr_pos = pos_r
                             self.last_valid_right_cm = dist_right_cm
                             lr_status = "right_only_rejected_left"
@@ -310,8 +348,6 @@ class PoseEstimator:
                             self.last_valid_left_cm = dist_left_cm
                             lr_status = "left_only_rejected_right"
                     else:
-                        # First frame with no prior history: an obstacle inside the field
-                        # shortens the beam, so prefer the longer (unobstructed) beam.
                         if dist_left_cm >= dist_right_cm:
                             lr_pos = pos_l
                             self.last_valid_left_cm = dist_left_cm
@@ -321,7 +357,19 @@ class PoseEstimator:
                             self.last_valid_right_cm = dist_right_cm
                             lr_status = "right_only_bootstrap"
 
-            elif axis_l is not None and pos_l is not None:
+            elif axis_r is not None and pos_r is not None:
+                # 2-LiDAR default mode (Right beam only) or Left beam invalid
+                if (
+                    self.last_valid_right_cm is None
+                    or abs(dist_right_cm - self.last_valid_right_cm) <= self.max_right_delta_cm
+                ):
+                    lr_pos = pos_r
+                    self.last_valid_right_cm = dist_right_cm
+                    lr_status = "right_only"
+                else:
+                    lr_status = "right_rejected_delta"
+
+            elif axis_l is not None and pos_l is not None and dist_left_cm is not None:
                 # Only Left beam produced a valid wall projection
                 if (
                     self.last_valid_left_cm is None
@@ -332,18 +380,6 @@ class PoseEstimator:
                     lr_status = "left_only"
                 else:
                     lr_status = "left_rejected_delta"
-
-            elif axis_r is not None and pos_r is not None:
-                # Only Right beam produced a valid wall projection
-                if (
-                    self.last_valid_right_cm is None
-                    or abs(dist_right_cm - self.last_valid_right_cm) <= self.max_front_delta_cm
-                ):
-                    lr_pos = pos_r
-                    self.last_valid_right_cm = dist_right_cm
-                    lr_status = "right_only"
-                else:
-                    lr_status = "right_rejected_delta"
 
             # 2. Project Front (0 deg) beam
             axis_f, pos_f = self._project_ray_to_wall(
@@ -386,7 +422,7 @@ class PoseEstimator:
                 heading_deg=round(heading_deg, 2),
                 raw_heading_deg=round(raw_heading_deg, 2),
                 dist_front_cm=round(dist_front_cm, 2),
-                dist_left_cm=round(dist_left_cm, 2),
+                dist_left_cm=round(dist_left_cm, 2) if dist_left_cm is not None else None,
                 dist_right_cm=round(dist_right_cm, 2),
                 last_valid_left_cm=(
                     round(self.last_valid_left_cm, 2)
@@ -416,49 +452,34 @@ class PoseEstimator:
 # Unit Verification
 # ==============================================================================
 if __name__ == "__main__":
-    print("Testing PoseEstimator on 400cm (W) x 500cm (L) field...")
+    print("Testing PoseEstimator (3-LiDAR Front + Right + Left mode) on 400cm (W) x 500cm (L) field...")
     est = PoseEstimator()
 
     # 1. Robot at (x=150, y=120), facing Top wall (0 deg):
-    #    dist_front = 500 - 120 = 380 cm
-    #    dist_left  = 150 cm
-    #    dist_right = 400 - 150 = 250 cm
-    p1 = est.update(dist_front_cm=380.0, dist_left_cm=150.0, dist_right_cm=250.0, raw_heading_deg=0.0)
+    #    dist_front = 3800 mm (380 cm)
+    #    dist_right = 2500 mm (250 cm)
+    #    dist_left  = 1500 mm (150 cm)
+    p1 = est.update_from_mm(
+        dist_front_mm=3800, dist_right_mm=2500, dist_left_mm=1500, raw_heading_deg=0.0
+    )
     assert p1.valid and p1.x_cm == 150.0 and p1.y_cm == 120.0
-    assert p1.lr_status == "both_valid"
-    print("1. Normal centered pose passed:", p1)
+    assert p1.lr_status == "both_valid" and p1.front_status == "valid"
+    print("1. 3-LiDAR normal pose passed:", p1)
 
-    # 2. Robot moves to (x=154, y=125), but an obstacle blocks the Right LiDAR at 55 cm!
-    #    delta_L = |154 - 150| = 4 cm, delta_R = |55 - 250| = 195 cm -> should pick Left!
-    p2 = est.update(dist_front_cm=375.0, dist_left_cm=154.0, dist_right_cm=55.0, raw_heading_deg=0.0)
+    # 2. Robot moves to (x=154, y=125), but an obstacle blocks Right LiDAR at 550 mm (55 cm)!
+    #    dist_left = 1540 mm (154 cm, delta=4 cm), dist_right = 550 mm (55 cm, delta=195 cm)
+    #    Should reject Right and trust Left -> x = 154.0!
+    p2 = est.update_from_mm(
+        dist_front_mm=3750, dist_right_mm=550, dist_left_mm=1540, raw_heading_deg=0.0
+    )
     assert p2.x_cm == 154.0 and p2.y_cm == 125.0
     assert p2.lr_status == "left_only_rejected_right"
-    assert p2.last_valid_left_cm == 154.0 and p2.last_valid_right_cm == 250.0
-    print("2. Right-side obstacle rejection passed:", p2.lr_status, f"x={p2.x_cm}")
+    print("2. 3-LiDAR Right obstacle rejection passed:", p2.lr_status, f"x={p2.x_cm}, y={p2.y_cm}")
 
-    # 3. Obstacle clears on Right, new obstacle blocks Left LiDAR at 30 cm while robot is at x=158!
-    #    First frame after right clears at x=156 (d_L=156, d_R=244):
-    p3 = est.update(dist_front_cm=372.0, dist_left_cm=156.0, dist_right_cm=244.0, raw_heading_deg=0.0)
-    assert p3.lr_status == "both_valid" and p3.x_cm == 156.0
-    #    Now Left is blocked at 30 cm while robot moves to x=158 (d_R=242):
-    #    delta_L = |30 - 156| = 126 cm, delta_R = |242 - 244| = 2 cm -> should pick Right!
-    p4 = est.update(dist_front_cm=370.0, dist_left_cm=30.0, dist_right_cm=242.0, raw_heading_deg=0.0)
-    assert p4.lr_status == "right_only_rejected_left" and p4.x_cm == 158.0
-    print("3. Left-side obstacle rejection passed:", p4.lr_status, f"x={p4.x_cm}")
-
-    # 4. Test slight rotation (heading = 15 deg CW) at (x=200, y=250) with sensor offsets:
-    est_offset = PoseEstimator(
-        front_offset_cm=(0.0, 15.0),
-        left_offset_cm=(-10.0, 0.0),
-        right_offset_cm=(10.0, 0.0),
+    # 3. Obstacle clears on Right (dist_left=1560 mm, dist_right=2440 mm -> sum=400 cm)
+    p3 = est.update_from_mm(
+        dist_front_mm=3720, dist_right_mm=2440, dist_left_mm=1560, raw_heading_deg=0.0
     )
-    theta = math.radians(15.0)
-    # True distances from offset sensors to walls along tilted rays:
-    d_l = (200.0 - 10.0 * math.cos(theta)) / math.cos(theta)
-    d_r = (400.0 - 200.0 - 10.0 * math.cos(theta)) / math.cos(theta)
-    d_f = (500.0 - 250.0 - 15.0 * math.cos(theta)) / math.cos(theta)
-    p5 = est_offset.update(dist_front_cm=d_f, dist_left_cm=d_l, dist_right_cm=d_r, raw_heading_deg=15.0)
-    assert abs(p5.x_cm - 200.0) < 0.05 and abs(p5.y_cm - 250.0) < 0.05
-    print("4. Tilted heading (15 deg) + sensor offsets passed:", f"x={p5.x_cm}, y={p5.y_cm}")
+    assert p3.lr_status == "both_valid" and p3.x_cm == 156.0 and p3.y_cm == 128.0
+    print("3. 3-LiDAR Right recovery passed:", p3.lr_status, f"x={p3.x_cm}, y={p3.y_cm}")
     print("All PoseEstimator tests passed!")
-

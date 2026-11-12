@@ -734,11 +734,11 @@
 
       <article class="round border">
         <div class="small-text bold" style="margin-bottom: 8px;">
-          LiDAR Distances &amp; Geomagnetic Heading Simulator
+          ESP32 Sensor Telemetry Simulator (Front/Right/Left LiDAR, Heading &amp; Flywheel RPM)
         </div>
         <div class="grid">
           <div class="s6">
-            <label class="small-text">Front: <span class="mono bold" id="sim-f-label">350 cm</span></label>
+            <label class="small-text">Front LiDAR: <span class="mono bold" id="sim-f-label">350 cm</span></label>
             <input type="range" id="sim-f-slider" min="5" max="500" step="1" value="350" style="width: 100%;" />
           </div>
           <div class="s6">
@@ -746,18 +746,26 @@
             <input type="range" id="sim-h-slider" min="0" max="359" step="1" value="0" style="width: 100%;" />
           </div>
           <div class="s6">
-            <label class="small-text">Left: <span class="mono bold" id="sim-l-label">200 cm</span></label>
+            <label class="small-text">Left LiDAR: <span class="mono bold" id="sim-l-label">200 cm</span></label>
             <input type="range" id="sim-l-slider" min="5" max="400" step="1" value="200" style="width: 100%;" />
           </div>
           <div class="s6">
-            <label class="small-text">Right: <span class="mono bold" id="sim-r-label">200 cm</span></label>
+            <label class="small-text">Right LiDAR: <span class="mono bold" id="sim-r-label">200 cm</span></label>
             <input type="range" id="sim-r-slider" min="5" max="400" step="1" value="200" style="width: 100%;" />
+          </div>
+          <div class="s6">
+            <label class="small-text">Upper Flywheel: <span class="mono bold" id="sim-upper-rpm-label">4400 RPM</span></label>
+            <input type="range" id="sim-upper-rpm-slider" min="0" max="5500" step="50" value="4400" style="width: 100%;" />
+          </div>
+          <div class="s6">
+            <label class="small-text">Lower Flywheel: <span class="mono bold" id="sim-lower-rpm-slider-label">4400 RPM</span></label>
+            <input type="range" id="sim-lower-rpm-slider" min="0" max="5500" step="50" value="4400" style="width: 100%;" />
           </div>
         </div>
         <div class="row wrap" style="margin-top: 8px; gap: 6px;">
           <button class="button small primary round" id="sim-send-btn">
             <i>send</i>
-            <span>Send Sensor Reading</span>
+            <span>Send ESP32 Reading (3-LiDAR)</span>
           </button>
           <button class="button small border round" id="sim-obstacle-r-btn" title="Simulate an obstacle suddenly blocking Right LiDAR at 45 cm">
             <i>block</i>

@@ -1733,36 +1733,56 @@ function initFieldPoseMap() {
   const lSlider = document.getElementById("sim-l-slider");
   const rSlider = document.getElementById("sim-r-slider");
   const hSlider = document.getElementById("sim-h-slider");
+  const upperRpmSlider = document.getElementById("sim-upper-rpm-slider");
+  const lowerRpmSlider = document.getElementById("sim-lower-rpm-slider");
 
   const updateSimLabels = () => {
     document.getElementById("sim-f-label").textContent = `${fSlider.value} cm`;
     document.getElementById("sim-l-label").textContent = `${lSlider.value} cm`;
     document.getElementById("sim-r-label").textContent = `${rSlider.value} cm`;
     document.getElementById("sim-h-label").textContent = `${hSlider.value}\u00B0`;
+    if (upperRpmSlider) {
+      const lbl = document.getElementById("sim-upper-rpm-label");
+      if (lbl) lbl.textContent = `${upperRpmSlider.value} RPM`;
+    }
+    if (lowerRpmSlider) {
+      const lbl = document.getElementById("sim-lower-rpm-slider-label");
+      if (lbl) lbl.textContent = `${lowerRpmSlider.value} RPM`;
+    }
   };
 
   const sendSimPose = async (f, l, r, h) => {
     try {
+      const payload = {
+        dist_front_cm: Number(f),
+        dist_right_cm: Number(r),
+        raw_heading_deg: Number(h),
+        upper_rpm: upperRpmSlider ? Number(upperRpmSlider.value) : undefined,
+        lower_rpm: lowerRpmSlider ? Number(lowerRpmSlider.value) : undefined,
+      };
+      if (l !== null && l !== undefined) {
+        payload.dist_left_cm = Number(l);
+      }
       const res = await fetch("/api/pose/update", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          dist_front_cm: Number(f),
-          dist_left_cm: Number(l),
-          dist_right_cm: Number(r),
-          raw_heading_deg: Number(h),
-        }),
+        body: JSON.stringify(payload),
       });
       if (res.ok) {
         const data = await res.json();
         if (data.pose) updatePoseUI(data.pose);
+        if (data.esp32) {
+          latestSensorTelemetry = { ...latestSensorTelemetry, ...data.esp32 };
+          updateSensorTelemetryUI();
+        }
       }
     } catch (e) {
       console.error("Simulator update error:", e);
     }
   };
 
-  for (const s of [fSlider, lSlider, rSlider, hSlider]) {
+  for (const s of [fSlider, lSlider, rSlider, hSlider, upperRpmSlider, lowerRpmSlider]) {
+    if (!s) continue;
     s.addEventListener("input", () => {
       updateSimLabels();
       sendSimPose(fSlider.value, lSlider.value, rSlider.value, hSlider.value);
@@ -1892,6 +1912,10 @@ function updatePoseUI(pose) {
     statusText.textContent = "Obstacle on Right (Using L)";
   } else if (pose.lr_status === "right_only_rejected_left") {
     statusText.textContent = "Obstacle on Left (Using R)";
+  } else if (pose.lr_status === "right_rejected_delta") {
+    statusText.textContent = "Obstacle on Right (Rejected)";
+  } else if (pose.front_status === "rejected_delta") {
+    statusText.textContent = "Obstacle on Front (Rejected)";
   } else if (pose.valid) {
     statusText.textContent = "Pose Locked";
   } else {

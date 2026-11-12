@@ -46,6 +46,11 @@ When Auto expires, the robot immediately stops all motors and enters `AUTO_WAIT`
   - Live Shooter & Aiming Sensor Telemetry block (Target RPM, live/open-loop Upper & Lower RPMs, pitch angle state, distance & aim angle to active goal).
   - Auto (Distance) vs. Manual speed mode toggle via Web UI, inline/modal sliders, D-Pad Up/Down (`4`/`20`), and gamepad button action (`shooter_speed_auto_toggle`).
   - Battery/speed percentage indicator (`#battery-text`).
+- [x] **Host-Side ESP32 Sensor Telemetry Receiver & 3-LiDAR Localization (`core/esp32.py`, `core/comms.py`, `core/pose.py`, `web_panel/server.py`, `main.py`)**:
+  - Binary framed 25-byte telemetry packet over 115200 baud UART (`0xAA 0x55`, `LEN=18`, `SEQ`, `CMD=4`, `PART=4`, `<hhhIII` payload, `CRC8` polynomial `0x07`).
+  - 18-byte `<hhhIII` payload decoding: `upper_rpm` (`int16`), `lower_rpm` (`int16`), `heading_deg` (`int16`), `dist_front_mm` (`uint32`), `dist_right_mm` (`uint32`), and `dist_left_mm` (`uint32`, supporting $12+\text{ m}$ / $1,200,000\text{ mm}$ range with `0xFFFFFFFF` invalid sentinel).
+  - Dedicated `ESP32SensorReceiver` worker thread with auto-reconnect, staleness tracking, and simulation injection (`POST /api/esp32/simulate` & `POST /api/pose/update`).
+  - Updated `PoseEstimator` (`update_from_mm()`) to localize in 2D using **3 directional LiDARs (Front $0^\circ$ + Right $+90^\circ$ + Left $-90^\circ$)** with opposite-pair discrepancy check and delta obstacle rejection.
 
 ## Undone Tasks
 
@@ -57,8 +62,8 @@ When Auto expires, the robot immediately stops all motors and enters `AUTO_WAIT`
    - Pico W firmware update to drive upper and lower flywheels independently in `start_shoot()`.
 3. **Host Control Loop Integration (`main.py`)**:
    - 50 Hz control tick coordinating active PIDs, match phase gating, and UART transmissions.
-4. **ESP32 Sensor Interface & Telemetry**:
-   - Read 3 directional LiDARs, geomagnetic heading, and upper/lower flywheel RPM sensors from ESP32 into RPi 5 Host (to be designed and implemented after PID control).
+4. **ESP32 Sender Firmware Implementation (Planned)**:
+   - Implement ESP32 firmware to read Upper/Lower flywheel RPMs, geomagnetic heading (deg), and Front/Right/Left LiDAR distances (mm), pack the 25-byte `<hhhIII` frame with CRC-8 (`0x07`), and transmit at 50 Hz over 115200 baud UART to RPi 5.
 5. **Autonomous Routine Storage & Workflow**:
    - Sequence runner executing fixed steps during the 1:00 Auto phase (e.g. drive to point $\to$ align $\to$ spin up flywheels $\to$ feed balls).
 
@@ -117,17 +122,35 @@ When Auto expires, the robot immediately stops all motors and enters `AUTO_WAIT`
 
 ---
 
+# ESP32 Sensor Telemetry Plan & Specification
+
+## 1. Host-Side Receiver (`core/esp32.py`, `core/comms.py`, `core/pose.py`) — [DONE]
+- **Physical Link**: 115200 baud, `8N1` UART (`/dev/ttyAMA1` or `/dev/ttyUSB0`, configurable via `--esp32-port` and `--esp32-baud`).
+- **Frame Format (25 Bytes Total)**:
+  - Header (6B): `0xAA`, `0x55`, `LENGTH=18` (`0x12`), `SEQ` (`0..255`), `CMD=4` (`TELEMETRY`), `PART=4` (`SENSORS`).
+  - Payload (18B, `<hhhIII` little-endian):
+    - `upper_rpm` (`int16_t`): Upper flywheel speed in RPM.
+    - `lower_rpm` (`int16_t`): Lower flywheel speed in RPM.
+    - `heading_deg` (`int16_t`): Heading relative to earth in degrees.
+    - `dist_front_mm` (`uint32_t`): Front LiDAR distance in mm (supports $12+\text{ m}$ / $1,200,000\text{ mm}$; `0xFFFFFFFF` = invalid).
+    - `dist_right_mm` (`uint32_t`): Right LiDAR distance in mm (supports $12+\text{ m}$ / $1,200,000\text{ mm}$; `0xFFFFFFFF` = invalid).
+    - `dist_left_mm` (`uint32_t`): Left LiDAR distance in mm (supports $12+\text{ m}$ / $1,200,000\text{ mm}$; `0xFFFFFFFF` = invalid).
+  - Trailer (1B): `CRC8` (polynomial `0x07`, init `0x00`) over bytes `2..23`.
+
+## 2. ESP32 Sender Firmware Plan — [TODO]
+- **Sensors**:
+  - Dual flywheel Hall/optical tachometers (`upper_rpm`, `lower_rpm` as `int16_t`).
+  - Geomagnetic / IMU compass (`heading_deg` normalized to $[0, 359]^\circ$ as `int16_t`).
+  - Front ($0^\circ$), Right ($+90^\circ$), and Left ($-90^\circ$) LiDAR sensors (`dist_front_mm`, `dist_right_mm`, `dist_left_mm` as `uint32_t` in mm; `0xFFFFFFFF` on timeout/out-of-range).
+- **Transmit Loop**: Non-blocking 50 Hz (`20 ms` interval) serializer writing the 25-byte frame over `Serial1` (`115200 8N1`) to the RPi 5 Host.
+
+---
+
 # Undetermined Questions / Design Decisions (To Address in Next Steps)
 
-## 1. ESP32 Interface & Protocol (Next Step after PID)
-- **Physical Connection**: USB serial (`/dev/ttyUSB0` or `/dev/ttyACM0`) vs RPi 5 secondary GPIO UART (`/dev/ttyAMA1`).
-- **Wire Protocol**: Binary framed packet matching Pico W vs newline-delimited JSON.
-- **Streaming Rate & Baud Rate**: 115200 baud, 20 Hz / 50 Hz.
-
-## 2. Sensor Placement & Characteristics
+## 1. Sensor Placement & Characteristics
 - **LiDAR Mounting Offsets**: Exact $(dx, dy)$ relative to robot center once physically measured.
-- **LiDAR Specs**: Range and blind zones.
 - **Geomagnetic Heading**: Relative vs absolute azimuth calibration before match start.
 
-## 3. Autonomous Routine Storage
+## 2. Autonomous Routine Storage
 - Routine definition format: JSON sequence file vs Python script vs interactive Web UI editor.

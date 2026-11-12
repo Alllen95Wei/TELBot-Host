@@ -13,13 +13,25 @@ import gpiod
 import uvicorn
 from gpiod.line import Bias, Direction, Edge, Value
 
+from config import ESP32 as ESP32Config
 from config import EStop as EStopConfig
 from config import Safety as SafetyConfig
 from config import Server as ServerConfig
 from config import UART as UARTConfig
-from core import CmdType, MatchManager, Packet, PartType, PoseEstimator, UARTComm, VisionManager
+from core import (
+    CmdType,
+    ESP32SensorReceiver,
+    ESP32SensorSnapshot,
+    MatchManager,
+    Packet,
+    PartType,
+    PoseEstimator,
+    UARTComm,
+    VisionManager,
+)
 from web_panel.server import (
     app,
+    set_esp32_receiver,
     set_match_manager,
     set_pose_estimator,
     set_uart_comm,
@@ -178,6 +190,8 @@ class RobotHost:
         self,
         uart_port: str = UARTConfig.PORT,
         baud_rate: int = UARTConfig.BAUD_RATE,
+        esp32_port: str = ESP32Config.PORT,
+        esp32_baud: int = ESP32Config.BAUD_RATE,
         host: str = ServerConfig.HOST,
         port: int = ServerConfig.PORT,
         estop_pin: int = EStopConfig.PIN,
@@ -212,6 +226,15 @@ class RobotHost:
         )
         self.uart.register_callback(self._on_telemetry, cmd_type=CmdType.TELEMETRY)
         self.uart.register_callback(self._on_ack, cmd_type=CmdType.ACK)
+
+        self.esp32 = ESP32SensorReceiver(
+            port=esp32_port,
+            baudrate=esp32_baud,
+            timeout=ESP32Config.TIMEOUT,
+            stale_timeout_s=ESP32Config.STALE_TIMEOUT_S,
+            dry_run=dry_run,
+        )
+        self.esp32.register_callback(self._on_esp32_telemetry)
 
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._uvicorn_server: Optional[uvicorn.Server] = None
@@ -268,6 +291,19 @@ class RobotHost:
         except Exception as e:
             logger.debug(f"Failed to parse telemetry packet: {e}")
 
+    def _on_esp32_telemetry(self, snap: ESP32SensorSnapshot) -> None:
+        """Processes incoming 25-byte TELEMETRY frames from the ESP32 sensor hub."""
+        try:
+            self.latest_sensor_state = snap.to_dict()
+            self.pose_estimator.update_from_mm(
+                dist_front_mm=snap.dist_front_mm,
+                dist_right_mm=snap.dist_right_mm,
+                dist_left_mm=snap.dist_left_mm,
+                raw_heading_deg=float(snap.heading_deg),
+            )
+        except Exception as e:
+            logger.debug(f"Failed to process ESP32 telemetry snapshot: {e}")
+
     def _on_ack(self, packet: Packet) -> None:
         """Tracks heartbeat ACK responses from the Pico slave."""
         self.last_ack_time = time.monotonic()
@@ -275,18 +311,30 @@ class RobotHost:
 
     def process_sensor_feedback(self, sensor_data: dict) -> None:
         """
-        Updates field pose estimation when 3-directional LiDAR + heading readings
-        are present, and provides a hook for closed-loop control.
+        Updates field pose estimation when Front + Right (and optional Left) LiDAR
+        + heading readings are present, and provides a hook for closed-loop control.
         """
         if all(
             k in sensor_data
-            for k in ("dist_front_cm", "dist_left_cm", "dist_right_cm", "heading_deg")
+            for k in ("dist_front_cm", "dist_right_cm", "heading_deg")
+        ) and (
+            sensor_data["dist_front_cm"] is not None
+            or sensor_data["dist_right_cm"] is not None
         ):
+            left_val = sensor_data.get("dist_left_cm")
             self.pose_estimator.update(
-                dist_front_cm=float(sensor_data["dist_front_cm"]),
-                dist_left_cm=float(sensor_data["dist_left_cm"]),
-                dist_right_cm=float(sensor_data["dist_right_cm"]),
+                dist_front_cm=(
+                    float(sensor_data["dist_front_cm"])
+                    if sensor_data["dist_front_cm"] is not None
+                    else -1.0
+                ),
+                dist_right_cm=(
+                    float(sensor_data["dist_right_cm"])
+                    if sensor_data["dist_right_cm"] is not None
+                    else -1.0
+                ),
                 raw_heading_deg=float(sensor_data["heading_deg"]),
+                dist_left_cm=float(left_val) if left_val is not None else None,
             )
 
     # --------------------------------------------------------------------------
@@ -372,7 +420,9 @@ class RobotHost:
         try:
             # 1. Start UART workers and share with FastAPI
             self.uart.start()
+            self.esp32.start()
             set_uart_comm(self.uart)
+            set_esp32_receiver(self.esp32)
             set_pose_estimator(self.pose_estimator)
             set_match_manager(self.match_manager)
             set_vision_manager(self.vision_manager)
@@ -388,7 +438,7 @@ class RobotHost:
             scheme = "https" if use_ssl else "http"
             logger.info(
                 f"TELBot Host running on {scheme}://{self.host}:{self.port} "
-                f"(UART={self.uart.port}, dry_run={self.dry_run})"
+                f"(PicoUART={self.uart.port}, ESP32={self.esp32.port}, dry_run={self.dry_run})"
             )
 
             if not self._restart_requested:
@@ -401,6 +451,9 @@ class RobotHost:
 
             # Release GPIO line before stopping UART or restarting process
             self.estop.stop()
+
+            # Stop ESP32 telemetry receiver
+            self.esp32.stop()
 
             # Ensure final STOP_ALL is transmitted onto the wire before closing UART
             if self.uart.is_running:
@@ -419,13 +472,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--uart-port",
         default=UARTConfig.PORT,
-        help=f"UART device path (default: {UARTConfig.PORT})",
+        help=f"Pico W UART device path (default: {UARTConfig.PORT})",
     )
     parser.add_argument(
         "--baud",
         type=int,
         default=UARTConfig.BAUD_RATE,
-        help=f"UART baud rate (default: {UARTConfig.BAUD_RATE})",
+        help=f"Pico W UART baud rate (default: {UARTConfig.BAUD_RATE})",
+    )
+    parser.add_argument(
+        "--esp32-port",
+        default=ESP32Config.PORT,
+        help=f"ESP32 sensor UART device path (default: {ESP32Config.PORT})",
+    )
+    parser.add_argument(
+        "--esp32-baud",
+        type=int,
+        default=ESP32Config.BAUD_RATE,
+        help=f"ESP32 sensor UART baud rate (default: {ESP32Config.BAUD_RATE})",
     )
     parser.add_argument(
         "--host",
@@ -502,6 +566,8 @@ def main() -> None:
     host = RobotHost(
         uart_port=args.uart_port,
         baud_rate=args.baud,
+        esp32_port=args.esp32_port,
+        esp32_baud=args.esp32_baud,
         host=args.host,
         port=args.port,
         estop_pin=args.estop_pin,
