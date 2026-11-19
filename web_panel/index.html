@@ -403,7 +403,12 @@
               <div class="cmd-metric sensor-box">
                 <div class="row space-between middle-align">
                   <span class="label">Shooter Pitch Angle</span>
-                  <span class="mono tiny-badge" id="sensor-angle-dir-badge">IDLE</span>
+                  <div class="row middle-align" style="gap: 4px;">
+                    <button class="button tiny border round no-margin" id="reset-angle-steps-btn" title="Reset Pico pitch stepper step counter to 0" style="padding: 1px 6px; min-height: 20px; font-size: 0.66rem;">
+                      <span>Zero</span>
+                    </button>
+                    <span class="mono tiny-badge" id="sensor-angle-dir-badge">IDLE</span>
+                  </div>
                 </div>
                 <div class="value mono" id="sensor-shooter-angle">---.-&deg;</div>
                 <div class="sub-label mono" id="sensor-shooter-angle-sub">Stepper: OFF</div>

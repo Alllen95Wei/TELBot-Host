@@ -1315,6 +1315,20 @@ def disable_shooter_angle():
     }
 
 
+@app.post("/api/shooter/angle/reset_steps")
+def reset_shooter_angle_steps():
+    """
+    Resets the cumulative shooter pitch stepper step counter on the Pico to 0.
+    """
+    comm = _require_ready_uart()
+    comm.send_shooter_reset_angle_step()
+    return {
+        "status": "enqueued",
+        "subsystem": "shooter",
+        "angle_steps_reset": True,
+    }
+
+
 @app.post("/api/conveyor")
 def control_conveyor(req: ConveyorRequest):
     """
@@ -1678,6 +1692,9 @@ async def websocket_control(websocket: WebSocket):
             elif msg_type == "shooter_disable_angle":
                 last_angle_state = (False, False)
                 accepted = comm.send_shooter_disable_angle()
+
+            elif msg_type == "shooter_reset_angle_steps":
+                accepted = comm.send_shooter_reset_angle_step()
 
             elif msg_type == "conveyor":
                 if (

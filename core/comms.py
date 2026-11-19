@@ -259,6 +259,12 @@ class Packet:
         payload = struct.pack("<B", 0)
         return cls(cmd=CmdType.RUN, part=PartType.SHOOTER, payload=payload, seq=seq)
 
+    @classmethod
+    def create_shooter_reset_angle_step(cls, seq: int = 0) -> "Packet":
+        """Resets the cumulative TB6560 pitch stepper step counter on the Pico to 0."""
+        payload = struct.pack("<B", 1)
+        return cls(cmd=CmdType.RUN, part=PartType.SHOOTER, payload=payload, seq=seq)
+
     def parse_shooter_command(self) -> Tuple[int, int, bool, bool]:
         """
         Unpacks shooter command into (upper_flywheel, lower_flywheel, angle_run, angle_reversed).
@@ -779,6 +785,11 @@ class UARTComm:
         pkt = Packet.create_shooter_disable_angle()
         return self.send_packet(pkt, priority=priority)
 
+    def send_shooter_reset_angle_step(self, priority: int = 2) -> bool:
+        """Enqueues a command to reset the shooter pitch stepper step counter on the Pico."""
+        pkt = Packet.create_shooter_reset_angle_step()
+        return self.send_packet(pkt, priority=priority)
+
     def send_conveyor_command(
         self,
         trigger: int,
@@ -1031,7 +1042,15 @@ if __name__ == "__main__":
     assert len(pkt_shooter_dis.payload) == 1
     dec_shooter_dis = Packet.decode(pkt_shooter_dis.encode())
     assert dec_shooter_dis is not None
+    assert dec_shooter_dis.payload == b"\x00"
     assert dec_shooter_dis.parse_shooter_command() == (0, 0, False, False)
+
+    pkt_shooter_rst = Packet.create_shooter_reset_angle_step(seq=17)
+    assert len(pkt_shooter_rst.payload) == 1
+    dec_shooter_rst = Packet.decode(pkt_shooter_rst.encode())
+    assert dec_shooter_rst is not None
+    assert dec_shooter_rst.payload == b"\x01"
+    assert dec_shooter_rst.parse_shooter_command() == (0, 0, False, False)
     print(f"Shooter Packet OK: {dec_shooter}")
 
     # 3. Test Conveyor Command Packet

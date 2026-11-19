@@ -60,6 +60,7 @@ const BUTTON_ACTIONS = [
   { id: "angle_down_hold", label: "Shooter Angle Down (Hold)", short: "Pitch -" },
   { id: "angle_disable", label: "Shooter Angle Disable (On Press)", short: "Pitch Off" },
   { id: "angle_disable_release", label: "Shooter Angle Disable (On Release)", short: "Pitch Off (Rel)" },
+  { id: "angle_reset_steps", label: "Shooter Angle Step Counter Reset (On Press)", short: "Pitch Zero" },
   { id: "shooter_speed_auto_toggle", label: "Shooter Flywheel Speed Auto Mode (Toggle)", short: "Shoot Spd Auto (Tgl)" },
   { id: "zero_all", label: "Zero All Latch States", short: "Reset States" },
 ];
@@ -500,16 +501,33 @@ function applyAutoDistanceSpeed() {
   updateShooterSpeedUI();
 }
 
+function resetShooterAngleSteps() {
+  if (ws && wsConnected && ws.readyState === WebSocket.OPEN && !WEB_ESTOP) {
+    sendWsJson({ type: "shooter_reset_angle_steps" });
+  } else if (!WEB_ESTOP) {
+    fetch("/api/shooter/angle/reset_steps", { method: "POST" }).catch(() => {});
+  }
+  if (latestTelemetryData) {
+    latestTelemetryData.angle_steps = 0;
+    latestTelemetryData.shooter_steps = 0;
+    updateSensorTelemetryUI();
+  }
+}
+
 function initSensorTelemetryUI() {
   const autoBtn = document.getElementById("shooter-mode-auto-btn");
   const manualBtn = document.getElementById("shooter-mode-manual-btn");
   const inlineSlider = document.getElementById("inline-shooter-speed-slider");
+  const resetAngleStepsBtn = document.getElementById("reset-angle-steps-btn");
 
   if (autoBtn) {
     autoBtn.addEventListener("click", () => setShooterSpeedMode("auto"));
   }
   if (manualBtn) {
     manualBtn.addEventListener("click", () => setShooterSpeedMode("manual"));
+  }
+  if (resetAngleStepsBtn) {
+    resetAngleStepsBtn.addEventListener("click", resetShooterAngleSteps);
   }
   if (inlineSlider) {
     inlineSlider.addEventListener("input", () => {
@@ -1079,6 +1097,8 @@ function processButtonEdges() {
           toggleState.spinnerActive = !toggleState.spinnerActive;
         } else if (action === "angle_disable") {
           sendWsJson({ type: "shooter_disable_angle" });
+        } else if (action === "angle_reset_steps") {
+          resetShooterAngleSteps();
         } else if (action === "zero_all") {
           toggleState.shooterActive = false;
           toggleState.spinnerActive = false;
