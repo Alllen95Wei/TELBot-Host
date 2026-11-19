@@ -51,20 +51,18 @@ When Auto expires, the robot immediately stops all motors and enters `AUTO_WAIT`
   - 18-byte `<hhhIII` payload decoding: `upper_rpm` (`int16`), `lower_rpm` (`int16`), `heading_deg` (`int16`), `dist_front_mm` (`uint32`), `dist_right_mm` (`uint32`), and `dist_left_mm` (`uint32`, supporting $12+\text{ m}$ / $1,200,000\text{ mm}$ range with `0xFFFFFFFF` invalid sentinel).
   - Dedicated `ESP32SensorReceiver` worker thread with auto-reconnect, staleness tracking, and simulation injection (`POST /api/esp32/simulate` & `POST /api/pose/update`).
   - Updated `PoseEstimator` (`update_from_mm()`) to localize in 2D using **3 directional LiDARs (Front $0^\circ$ + Right $+90^\circ$ + Left $-90^\circ$)** with opposite-pair discrepancy check and delta obstacle rejection.
+- [x] **Dual Flywheel RPM PID Controller, Protocol & Host/Slave Integration (`core/control.py`, `core/comms.py`, `slave/`, `main.py`, `web_panel/server.py`)**:
+  - Implemented `ShooterSpeedController` (`core/control.py`) with two independent `[0, 1000]` unidirectional RPM PID instances (`upper_pid`, `lower_pid`), shared setpoint (`0..5500 RPM`), distance-to-RPM auto calculation (`config.ShooterPID.DISTANCE_TO_RPM_TABLE`), manual override, and open-loop feedforward fallback when ESP32 telemetry is absent or stale.
+  - Updated `PART_SHOOTER` binary framing to 6 bytes (`<hhBB` full dual-flywheel + angle) and 4 bytes (`<hh` dual-flywheel only), and updated Pico W `Shooter.start_shoot(upper_speed, lower_speed)` + `UARTCommunicator.dispatch_packet()`.
+  - Integrated the 50 Hz flywheel PID loop with E-Stop and match phase gating into `main.py` (via `step_shooter_control`), plus `/api/shooter/pid` REST endpoints and `/ws/control` UI telemetry updates.
 
 ## Undone Tasks
 
-1. **Subsystem PID Controllers (`core/control.py`)**:
+1. **Chassis Pose-to-Point PID Controller (`core/control.py`)**:
    - Closed-loop Chassis Pose-to-Point PID (`ChassisPoseController`) for autonomous field navigation.
-   - Closed-loop Dual Flywheel RPM PID (`ShooterSpeedController`) with automatic distance-to-RPM calculation and manual fallback.
-2. **Protocol & Slave Firmware Updates**:
-   - Split dual-flywheel packet framing (`PART_SHOOTER`: 4 bytes `<hh` or 6 bytes `<hhBB`).
-   - Pico W firmware update to drive upper and lower flywheels independently in `start_shoot()`.
-3. **Host Control Loop Integration (`main.py`)**:
-   - 50 Hz control tick coordinating active PIDs, match phase gating, and UART transmissions.
-4. **ESP32 Sender Firmware Implementation (Planned)**:
+2. **ESP32 Sender Firmware Implementation (Planned)**:
    - Implement ESP32 firmware to read Upper/Lower flywheel RPMs, geomagnetic heading (deg), and Front/Right/Left LiDAR distances (mm), pack the 25-byte `<hhhIII` frame with CRC-8 (`0x07`), and transmit at 50 Hz over 115200 baud UART to RPi 5.
-5. **Autonomous Routine Storage & Workflow**:
+3. **Autonomous Routine Storage & Workflow**:
    - Sequence runner executing fixed steps during the 1:00 Auto phase (e.g. drive to point $\to$ align $\to$ spin up flywheels $\to$ feed balls).
 
 ---
@@ -92,28 +90,28 @@ When Auto expires, the robot immediately stops all motors and enters `AUTO_WAIT`
   $$v_x = u_Y \cos\theta + u_X \sin\theta, \qquad v_y = u_X \cos\theta - u_Y \sin\theta$$
 - **Safety**: Auto-zero output on stale/invalid pose; `is_at_target()` check with configurable tolerances.
 
-## 3. Dual Flywheel RPM PID + Distance Auto-Speed (`ShooterSpeedController` in `core/control.py`) — [TODO]
+## 3. Dual Flywheel RPM PID + Distance Auto-Speed (`ShooterSpeedController` in `core/control.py`) — [DONE]
 - **Shared Target**: Operator and auto-distance logic produce **one shared setpoint** ($0 \sim 5500$ RPM).
 - **Dual Independent Regulation**: Two independent PID instances (`upper_pid`, `lower_pid`) regulate upper and lower flywheels separately against the shared target to compensate for physical motor/ESC differences:
   - Outputs clamped to $[0, 1000]$ (no negative output / reverse braking).
   - Target 0 immediately returns $(0, 0)$ and resets integrators.
 - **Distance-Based Auto-Speed**:
   - Computes Euclidean distance $d$ from robot pose to target grid along the top wall ($y = 500\text{ cm}$).
-  - Evaluates configurable piecewise-linear interpolation table in `config.py` to set target RPM.
+  - Evaluates configurable piecewise-linear interpolation table in `config.py` (`ShooterPID.DISTANCE_TO_RPM_TABLE`) to set target RPM.
   - Operates in **Auto (Distance)** mode by default; operator adjusting manual slider or Cross Pad D-pad switches to **Manual Override**.
 - **Pre-ESP32 Sensor Fallback**:
   - When ESP32 live RPM telemetry is present: full closed-loop PID.
   - Before ESP32 is integrated or when RPM data is stale: open-loop feedforward fallback ($\text{cmd} = \text{round}(1000 \times \text{target\_rpm} / 5500)$) to prevent integral windup against missing feedback.
 
-## 4. Protocol & Slave Firmware Updates — [TODO]
+## 4. Protocol & Slave Firmware Updates — [DONE]
 - **UART Framing (`PART_SHOOTER`)**:
   - Full shooter packet: 6 bytes (`<hhBB`) $\to$ `(upper_flywheel, lower_flywheel, angle_run, angle_reversed)`.
   - Flywheel-only packet: 4 bytes (`<hh`) $\to$ `(upper_flywheel, lower_flywheel)`.
   - Angle-only (3 bytes, `<BBB`) and Disable-angle (1 byte, `<B`) remain distinct and non-colliding.
-- **Pico W `Shooter` Subsystem**: Update `start_shoot(upper_speed: float, lower_speed: float | None = None)` to drive `upper_flywheel` and `lower_flywheel` independently.
+- **Pico W `Shooter` Subsystem**: Updated `start_shoot(upper_speed: float, lower_speed: float | None = None)` and `UARTCommunicator.dispatch_packet()` to drive `upper_flywheel` and `lower_flywheel` independently.
 
 ## 5. Host Integration & Web UI
-- **Control Loop in `main.py` [TODO]**: 50 Hz control tick coordinating active PIDs, match phase gating, and UART transmissions.
+- **Control Loop in `main.py` [DONE for Flywheel PID]**: 50 Hz control tick (`step_shooter_control`) coordinating dual flywheel PID, match phase gating, and UART transmissions (`ChassisPoseController` pending).
 - **Web Console [DONE]**:
   - Single shared speed control (slider + Cross Pad D-pad `4`/`20` step adjustment).
   - Mode toggle: Auto (Distance) vs. Manual.
