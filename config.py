@@ -51,12 +51,14 @@ class Field:
 class PoseSensor:
     # LiDAR mounting offsets (dx, dy) in cm relative to robot center (0, 0)
     # Robot body frame: +x is right, +y is front (update once physically measured)
+
+    # Since these 3 LiDAR are actually the same one, the offsets are the same
     FRONT_OFFSET_X_CM = 0.0
-    FRONT_OFFSET_Y_CM = 0.0
-    LEFT_OFFSET_X_CM = 0.0
-    LEFT_OFFSET_Y_CM = 0.0
-    RIGHT_OFFSET_X_CM = 0.0
-    RIGHT_OFFSET_Y_CM = 0.0
+    FRONT_OFFSET_Y_CM = 9.0
+    LEFT_OFFSET_X_CM = FRONT_OFFSET_X_CM
+    LEFT_OFFSET_Y_CM = FRONT_OFFSET_Y_CM
+    RIGHT_OFFSET_X_CM = FRONT_OFFSET_X_CM
+    RIGHT_OFFSET_Y_CM = FRONT_OFFSET_Y_CM
 
     # Valid LiDAR range limits (in cm)
     MIN_RANGE_CM = 2.0
