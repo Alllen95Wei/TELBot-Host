@@ -4,7 +4,14 @@ Contains hardware communication, packet protocols, and field pose estimation.
 """
 
 from core.comms import CmdType, Packet, PacketParser, PartType, UARTComm
-from core.control import ShooterControlState, ShooterSpeedController, step_shooter_control
+from core.control import (
+    ConveyorControlState,
+    ConveyorController,
+    ShooterControlState,
+    ShooterSpeedController,
+    step_conveyor_control,
+    step_shooter_control,
+)
 from core.esp32 import ESP32SensorReceiver, ESP32SensorSnapshot
 from core.match import MatchManager, MatchMode
 from core.pid import PIDConfig, PIDController, PIDState, wrap_angle_deg
@@ -17,8 +24,11 @@ __all__ = [
     "PacketParser",
     "PartType",
     "UARTComm",
+    "ConveyorControlState",
+    "ConveyorController",
     "ShooterControlState",
     "ShooterSpeedController",
+    "step_conveyor_control",
     "step_shooter_control",
     "ESP32SensorReceiver",
     "ESP32SensorSnapshot",

@@ -1,10 +1,12 @@
 """
-core/control.py - Subsystem Closed-Loop PID Controllers for TELBot
+core/control.py - Subsystem Closed-Loop PID & Conveyor Controllers for TELBot
 
 Implements:
   - ShooterControlState: Thread-safe telemetry snapshot of the dual-flywheel PID controller.
   - ShooterSpeedController: Dual independent closed-loop flywheel RPM PID controller
     with distance-based auto-speed calculation, manual override, and open-loop feedforward fallback.
+  - ConveyorControlState: Thread-safe state snapshot of conveyor trigger & spinner arbitration.
+  - ConveyorController: Automatic spinner anti-jam reverse when shooter is running with no ball detected.
 """
 
 from __future__ import annotations
@@ -12,6 +14,7 @@ from __future__ import annotations
 import math
 import sys
 import threading
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -20,6 +23,7 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from config import ConveyorAutoReverse as ConveyorAutoReverseConfig
 from config import ESP32 as ESP32Config
 from config import ShooterPID as ShooterPIDConfig
 from config import SpecialGrid as SpecialGridConfig
@@ -465,6 +469,351 @@ def step_shooter_control(
     return last_sent_flywheel
 
 
+@dataclass
+class ConveyorControlState:
+    """Snapshot of conveyor operator intent, effective commands, and spinner auto-reverse FSM."""
+
+    auto_reverse_enabled: bool = bool(ConveyorAutoReverseConfig.ENABLED)
+    auto_reversing: bool = False
+    state: str = "idle"
+    ball_detected: Optional[bool] = None
+    shooter_running: bool = False
+    operator_trigger: int = 0
+    operator_spinner_run: bool = False
+    operator_spinner_reversed: bool = False
+    effective_trigger: int = 0
+    effective_spinner_run: bool = False
+    effective_spinner_reversed: bool = False
+    no_ball_elapsed_s: float = 0.0
+    reverse_remaining_s: float = 0.0
+    cooldown_remaining_s: float = 0.0
+    reverse_count: int = 0
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+class ConveyorController:
+    """
+    Arbitrates operator conveyor commands with automatic anti-jam spinner reversal.
+    When the shooter is running and ESP32 IR telemetry reports ball_detected=False
+    for NO_BALL_DELAY_S, reverses the spinner for REVERSE_DURATION_S (with COOLDOWN_S
+    dwell between pulses) without losing or clobbering operator intent.
+    """
+
+    def __init__(
+        self,
+        enabled: bool = ConveyorAutoReverseConfig.ENABLED,
+        no_ball_delay_s: float = ConveyorAutoReverseConfig.NO_BALL_DELAY_S,
+        reverse_duration_s: float = ConveyorAutoReverseConfig.REVERSE_DURATION_S,
+        cooldown_s: float = ConveyorAutoReverseConfig.COOLDOWN_S,
+    ) -> None:
+        self._lock = threading.RLock()
+        self._auto_reverse_enabled = bool(enabled)
+        self._no_ball_delay_s = max(0.0, float(no_ball_delay_s))
+        self._reverse_duration_s = max(0.0, float(reverse_duration_s))
+        self._cooldown_s = max(0.0, float(cooldown_s))
+
+        self._operator_trigger: int = 0
+        self._operator_spinner_run: bool = False
+        self._operator_spinner_reversed: bool = False
+
+        self._phase: str = "idle"
+        self._phase_start_time: Optional[float] = None
+        self._reverse_count: int = 0
+        self._state = ConveyorControlState(
+            auto_reverse_enabled=self._auto_reverse_enabled
+        )
+
+    @property
+    def auto_reversing(self) -> bool:
+        with self._lock:
+            return self._phase == "reversing"
+
+    @property
+    def is_active(self) -> bool:
+        with self._lock:
+            return (
+                self._operator_trigger != 0
+                or self._operator_spinner_run
+                or self._phase == "reversing"
+            )
+
+    @property
+    def state(self) -> ConveyorControlState:
+        with self._lock:
+            return ConveyorControlState(**self._state.to_dict())
+
+    def _effective_command_locked(self) -> tuple[int, bool, bool]:
+        if self._phase == "reversing":
+            return (self._operator_trigger, True, True)
+        return (
+            self._operator_trigger,
+            self._operator_spinner_run,
+            self._operator_spinner_reversed,
+        )
+
+    def _refresh_effective_state_locked(self) -> None:
+        eff_trig, eff_run, eff_rev = self._effective_command_locked()
+        self._state.auto_reverse_enabled = self._auto_reverse_enabled
+        self._state.auto_reversing = self._phase == "reversing"
+        self._state.state = self._phase
+        self._state.operator_trigger = self._operator_trigger
+        self._state.operator_spinner_run = self._operator_spinner_run
+        self._state.operator_spinner_reversed = self._operator_spinner_reversed
+        self._state.effective_trigger = eff_trig
+        self._state.effective_spinner_run = eff_run
+        self._state.effective_spinner_reversed = eff_rev
+        self._state.reverse_count = self._reverse_count
+
+    def set_operator_command(
+        self,
+        trigger: int,
+        spinner_run: bool,
+        spinner_reversed: bool,
+    ) -> tuple[int, bool, bool]:
+        """Stores operator conveyor intent and returns the arbitrated effective command."""
+        with self._lock:
+            self._operator_trigger = max(-1000, min(1000, int(trigger)))
+            self._operator_spinner_run = bool(spinner_run)
+            self._operator_spinner_reversed = bool(spinner_reversed)
+            self._refresh_effective_state_locked()
+            return self._effective_command_locked()
+
+    def set_operator_trigger(self, speed: int) -> int:
+        """Stores operator trigger speed and returns the effective trigger speed."""
+        with self._lock:
+            self._operator_trigger = max(-1000, min(1000, int(speed)))
+            self._refresh_effective_state_locked()
+            return self._operator_trigger
+
+    def set_operator_spinner(
+        self, run: bool, reversed: bool
+    ) -> tuple[bool, bool]:
+        """Stores operator spinner intent and returns the effective spinner command."""
+        with self._lock:
+            self._operator_spinner_run = bool(run)
+            self._operator_spinner_reversed = bool(reversed)
+            self._refresh_effective_state_locked()
+            _, eff_run, eff_rev = self._effective_command_locked()
+            return (eff_run, eff_rev)
+
+    def set_config(
+        self,
+        enabled: Optional[bool] = None,
+        no_ball_delay_s: Optional[float] = None,
+        reverse_duration_s: Optional[float] = None,
+        cooldown_s: Optional[float] = None,
+    ) -> None:
+        """Updates automatic spinner reverse parameters at runtime."""
+        for name, val in (
+            ("no_ball_delay_s", no_ball_delay_s),
+            ("reverse_duration_s", reverse_duration_s),
+            ("cooldown_s", cooldown_s),
+        ):
+            if val is not None and float(val) < 0.0:
+                raise ValueError(f"{name} must be >= 0.0, got {val!r}")
+
+        with self._lock:
+            if enabled is not None:
+                self._auto_reverse_enabled = bool(enabled)
+                if not self._auto_reverse_enabled:
+                    self._phase = "idle"
+                    self._phase_start_time = None
+                    self._state.no_ball_elapsed_s = 0.0
+                    self._state.reverse_remaining_s = 0.0
+                    self._state.cooldown_remaining_s = 0.0
+            if no_ball_delay_s is not None:
+                self._no_ball_delay_s = float(no_ball_delay_s)
+            if reverse_duration_s is not None:
+                self._reverse_duration_s = float(reverse_duration_s)
+                if self._reverse_duration_s <= 0.0:
+                    self._phase = "idle"
+                    self._phase_start_time = None
+                    self._state.reverse_remaining_s = 0.0
+            if cooldown_s is not None:
+                self._cooldown_s = float(cooldown_s)
+            self._refresh_effective_state_locked()
+
+    def get_config(self) -> dict:
+        with self._lock:
+            return {
+                "enabled": self._auto_reverse_enabled,
+                "no_ball_delay_s": self._no_ball_delay_s,
+                "reverse_duration_s": self._reverse_duration_s,
+                "cooldown_s": self._cooldown_s,
+            }
+
+    def get_status(self) -> dict:
+        with self._lock:
+            return self._state.to_dict()
+
+    def reset_auto_reverse(self) -> None:
+        """Resets the auto-reverse state machine back to idle while preserving operator intent."""
+        with self._lock:
+            self._phase = "idle"
+            self._phase_start_time = None
+            self._state.no_ball_elapsed_s = 0.0
+            self._state.reverse_remaining_s = 0.0
+            self._state.cooldown_remaining_s = 0.0
+            self._refresh_effective_state_locked()
+
+    def stop(self) -> tuple[int, bool, bool]:
+        """Clears operator intent, resets auto-reverse FSM, and returns (0, False, False)."""
+        with self._lock:
+            self._operator_trigger = 0
+            self._operator_spinner_run = False
+            self._operator_spinner_reversed = False
+            self._phase = "idle"
+            self._phase_start_time = None
+            self._state.shooter_running = False
+            self._state.no_ball_elapsed_s = 0.0
+            self._state.reverse_remaining_s = 0.0
+            self._state.cooldown_remaining_s = 0.0
+            self._refresh_effective_state_locked()
+            return (0, False, False)
+
+    def update(
+        self,
+        shooter_running: bool,
+        esp32_snapshot: Optional[ESP32SensorSnapshot] = None,
+        stale_timeout_s: float = ESP32Config.STALE_TIMEOUT_S,
+        now: Optional[float] = None,
+    ) -> tuple[int, bool, bool]:
+        """
+        Evaluates automatic spinner anti-jam reverse and returns the arbitrated
+        conveyor command tuple (trigger, spinner_run, spinner_reversed).
+        """
+        t = time.monotonic() if now is None else float(now)
+        esp32_fresh = (
+            esp32_snapshot is not None
+            and esp32_snapshot.is_fresh(stale_timeout_s)
+        )
+        ball_detected: Optional[bool] = (
+            bool(esp32_snapshot.ball_detected) if esp32_fresh else None
+        )
+
+        with self._lock:
+            shooter_active = bool(shooter_running)
+            if (
+                not self._auto_reverse_enabled
+                or self._reverse_duration_s <= 0.0
+                or not shooter_active
+                or ball_detected is None
+                or ball_detected is True
+            ):
+                self._phase = "idle"
+                self._phase_start_time = None
+                no_ball_elapsed_s = 0.0
+                reverse_remaining_s = 0.0
+                cooldown_remaining_s = 0.0
+            else:
+                if self._phase == "idle":
+                    if self._no_ball_delay_s <= 0.0:
+                        self._phase = "reversing"
+                        self._phase_start_time = t
+                        self._reverse_count += 1
+                    else:
+                        self._phase = "waiting"
+                        self._phase_start_time = t
+                elif self._phase == "waiting":
+                    elapsed = max(0.0, t - (self._phase_start_time if self._phase_start_time is not None else t))
+                    if elapsed >= self._no_ball_delay_s:
+                        self._phase = "reversing"
+                        self._phase_start_time = t
+                        self._reverse_count += 1
+                elif self._phase == "reversing":
+                    elapsed = max(0.0, t - (self._phase_start_time if self._phase_start_time is not None else t))
+                    if elapsed >= self._reverse_duration_s:
+                        if self._cooldown_s > 0.0:
+                            self._phase = "cooldown"
+                        else:
+                            self._phase = "waiting"
+                        self._phase_start_time = t
+                elif self._phase == "cooldown":
+                    elapsed = max(0.0, t - (self._phase_start_time if self._phase_start_time is not None else t))
+                    if elapsed >= self._cooldown_s:
+                        self._phase = "reversing"
+                        self._phase_start_time = t
+                        self._reverse_count += 1
+
+                phase_elapsed = max(
+                    0.0,
+                    t - (self._phase_start_time if self._phase_start_time is not None else t),
+                )
+                no_ball_elapsed_s = round(phase_elapsed, 3) if self._phase == "waiting" else 0.0
+                reverse_remaining_s = (
+                    round(max(0.0, self._reverse_duration_s - phase_elapsed), 3)
+                    if self._phase == "reversing"
+                    else 0.0
+                )
+                cooldown_remaining_s = (
+                    round(max(0.0, self._cooldown_s - phase_elapsed), 3)
+                    if self._phase == "cooldown"
+                    else 0.0
+                )
+
+            eff_trig, eff_run, eff_rev = self._effective_command_locked()
+            self._state = ConveyorControlState(
+                auto_reverse_enabled=self._auto_reverse_enabled,
+                auto_reversing=(self._phase == "reversing"),
+                state=self._phase,
+                ball_detected=ball_detected,
+                shooter_running=shooter_active,
+                operator_trigger=self._operator_trigger,
+                operator_spinner_run=self._operator_spinner_run,
+                operator_spinner_reversed=self._operator_spinner_reversed,
+                effective_trigger=eff_trig,
+                effective_spinner_run=eff_run,
+                effective_spinner_reversed=eff_rev,
+                no_ball_elapsed_s=no_ball_elapsed_s,
+                reverse_remaining_s=reverse_remaining_s,
+                cooldown_remaining_s=cooldown_remaining_s,
+                reverse_count=self._reverse_count,
+            )
+            return (eff_trig, eff_run, eff_rev)
+
+
+def step_conveyor_control(
+    conveyor_controller: ConveyorController,
+    shooter_controller: ShooterSpeedController,
+    uart: UARTComm,
+    match_manager: MatchManager,
+    esp32_receiver: ESP32SensorReceiver,
+    last_sent_spinner: tuple[bool, bool],
+    now: Optional[float] = None,
+) -> tuple[bool, bool]:
+    """
+    Executes one 50 Hz conveyor spinner anti-jam tick with E-Stop and match phase gating.
+    Returns the updated (spinner_run, spinner_reversed) last-sent pair.
+    """
+    if uart.estop_active or match_manager.mode not in (
+        MatchMode.AUTO,
+        MatchMode.TELEOP,
+        MatchMode.PRACTICE,
+    ):
+        if conveyor_controller.is_active or last_sent_spinner != (False, False):
+            conveyor_controller.stop()
+            if not uart.estop_active:
+                uart.send_conveyor_command(0, False, False)
+        return (False, False)
+
+    shooter_running = bool(
+        shooter_controller.enabled and shooter_controller.state.target_rpm > 0.0
+    )
+    _, eff_run, eff_rev = conveyor_controller.update(
+        shooter_running=shooter_running,
+        esp32_snapshot=esp32_receiver.latest_snapshot,
+        stale_timeout_s=esp32_receiver.stale_timeout_s,
+        now=now,
+    )
+    current_spinner = (eff_run, eff_rev)
+    if current_spinner != last_sent_spinner or conveyor_controller.auto_reversing:
+        uart.send_conveyor_spinner(run=eff_run, reversed=eff_rev)
+        return current_spinner
+    return last_sent_spinner
+
+
 # ==============================================================================
 # Unit Verification
 # ==============================================================================
@@ -635,3 +984,122 @@ if __name__ == "__main__":
     ctrl.update(pose=invalid_pose, vision_target=vision_left)
     assert abs(ctrl.state.target_rpm - ctrl.manual_target_rpm) < 1e-6
     print("All ShooterSpeedController tests PASSED!")
+
+    print("Testing ConveyorController...")
+    conv = ConveyorController(
+        enabled=True,
+        no_ball_delay_s=0.5,
+        reverse_duration_s=0.4,
+        cooldown_s=1.0,
+    )
+
+    def _make_snap(ball_detected: bool, age_s: float = 0.0) -> ESP32SensorSnapshot:
+        return ESP32SensorSnapshot(
+            upper_rpm=4400,
+            lower_rpm=4400,
+            heading_deg=0,
+            dist_front_mm=2000,
+            dist_right_mm=2000,
+            dist_left_mm=2000,
+            dist_front_cm=200.0,
+            dist_right_cm=200.0,
+            dist_left_cm=200.0,
+            seq=10,
+            timestamp=time.monotonic() - age_s,
+            wall_time=time.time() - age_s,
+            ball_detected=ball_detected,
+        )
+
+    # 1. Idle when shooter is off, ESP32 is missing/stale, or ball is detected
+    snap_no_ball = _make_snap(ball_detected=False)
+    snap_with_ball = _make_snap(ball_detected=True)
+    snap_stale = _make_snap(ball_detected=False, age_s=2.0)
+
+    assert conv.update(shooter_running=False, esp32_snapshot=snap_no_ball, now=0.0) == (0, False, False)
+    assert conv.state.state == "idle"
+    assert conv.update(shooter_running=True, esp32_snapshot=None, now=1.0) == (0, False, False)
+    assert conv.state.state == "idle"
+    assert conv.update(shooter_running=True, esp32_snapshot=snap_stale, stale_timeout_s=0.5, now=2.0) == (0, False, False)
+    assert conv.state.state == "idle"
+    assert conv.update(shooter_running=True, esp32_snapshot=snap_with_ball, now=3.0) == (0, False, False)
+    assert conv.state.state == "idle"
+
+    # 2. Delay -> auto-reverse (True, True) -> cooldown -> repeat pulse when operator spinner was OFF
+    assert conv.update(shooter_running=True, esp32_snapshot=snap_no_ball, now=10.0) == (0, False, False)
+    assert conv.state.state == "waiting"
+    assert conv.update(shooter_running=True, esp32_snapshot=snap_no_ball, now=10.49) == (0, False, False)
+    assert conv.state.state == "waiting"
+    # Delay elapses at 10.50 -> enters reversing
+    assert conv.update(shooter_running=True, esp32_snapshot=snap_no_ball, now=10.50) == (0, True, True)
+    assert conv.auto_reversing is True
+    assert conv.state.state == "reversing"
+    assert conv.state.reverse_count == 1
+    # Still reversing before 10.90; operator command must NOT clobber auto-reverse
+    assert conv.set_operator_command(700, True, False) == (700, True, True)
+    assert conv.update(shooter_running=True, esp32_snapshot=snap_no_ball, now=10.89) == (700, True, True)
+    # Reverse finishes at 10.90 -> cooldown restores operator intent (700, True, False)
+    assert conv.update(shooter_running=True, esp32_snapshot=snap_no_ball, now=10.90) == (700, True, False)
+    assert conv.auto_reversing is False
+    assert conv.state.state == "cooldown"
+    # Cooldown finishes at 11.90 -> second reverse pulse
+    assert conv.update(shooter_running=True, esp32_snapshot=snap_no_ball, now=11.90) == (700, True, True)
+    assert conv.state.reverse_count == 2
+
+    # 3. Immediate cancellation mid-reverse when ball_detected becomes True
+    assert conv.update(shooter_running=True, esp32_snapshot=snap_with_ball, now=12.00) == (700, True, False)
+    assert conv.auto_reversing is False
+    assert conv.state.state == "idle"
+
+    # 4. Immediate cancellation mid-reverse when shooter stops (with operator spinner OFF -> returns to OFF)
+    conv.set_operator_command(0, False, False)
+    conv.update(shooter_running=True, esp32_snapshot=snap_no_ball, now=20.0)
+    assert conv.update(shooter_running=True, esp32_snapshot=snap_no_ball, now=20.5) == (0, True, True)
+    assert conv.update(shooter_running=False, esp32_snapshot=snap_no_ball, now=20.6) == (0, False, False)
+    assert conv.state.state == "idle"
+
+    # 5. step_conveyor_control integration with dry-run UARTComm
+    with UARTComm(dry_run=True) as dry_uart:
+        match_mgr = MatchManager()
+        match_mgr.start_practice()
+        esp_rx = ESP32SensorReceiver(dry_run=True)
+        shooter_ctrl = ShooterSpeedController()
+        shooter_ctrl.set_manual_rpm(4400.0, switch_to_manual=True)
+        shooter_ctrl.set_enabled(True)
+        shooter_ctrl.update()
+        conv_ctrl = ConveyorController(
+            enabled=True, no_ball_delay_s=0.5, reverse_duration_s=0.4, cooldown_s=1.0
+        )
+        esp_rx.inject_telemetry(4400, 4400, 0, 2000, 2000, 2000, ball_detected=False)
+
+        last_sp = (False, False)
+        last_sp = step_conveyor_control(
+            conv_ctrl, shooter_ctrl, dry_uart, match_mgr, esp_rx, last_sp, now=100.0
+        )
+        assert last_sp == (False, False)
+        # Advance past 0.5s delay -> triggers spinner reverse packet
+        tx_before = dry_uart.get_stats()["tx_packets"]
+        last_sp = step_conveyor_control(
+            conv_ctrl, shooter_ctrl, dry_uart, match_mgr, esp_rx, last_sp, now=100.55
+        )
+        assert last_sp == (True, True)
+        dry_uart.flush_tx(timeout=0.2)
+        assert dry_uart.get_stats()["tx_packets"] > tx_before
+        # Advance past 0.4s reverse -> restores (False, False)
+        last_sp = step_conveyor_control(
+            conv_ctrl, shooter_ctrl, dry_uart, match_mgr, esp_rx, last_sp, now=100.96
+        )
+        assert last_sp == (False, False)
+        # Disarming halts active spinner immediately
+        conv_ctrl.set_operator_command(500, True, False)
+        last_sp = step_conveyor_control(
+            conv_ctrl, shooter_ctrl, dry_uart, match_mgr, esp_rx, last_sp, now=101.0
+        )
+        assert last_sp == (True, False)
+        match_mgr.disarm()
+        last_sp = step_conveyor_control(
+            conv_ctrl, shooter_ctrl, dry_uart, match_mgr, esp_rx, last_sp, now=101.1
+        )
+        assert last_sp == (False, False)
+        assert conv_ctrl.is_active is False
+
+    print("All ConveyorController tests PASSED!")

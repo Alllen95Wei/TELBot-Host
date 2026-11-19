@@ -184,6 +184,7 @@ const DISTANCE_TO_RPM_TABLE = [
 let shooterSpeedMode = "auto"; // "auto" (Distance-based) or "manual"
 let latestTelemetryData = null;
 let latestShooterPidState = null;
+let latestConveyorState = null;
 const uiAngleState = { run: false, reversed: false };
 
 // ============================================================================
@@ -541,6 +542,10 @@ function updateSensorTelemetryUI() {
   const distColBadgeEl = document.getElementById("sensor-target-col-badge");
   const distAimSubEl = document.getElementById("sensor-target-aim-sub");
 
+  const ballChipEl = document.getElementById("ball-sensor-chip");
+  const ballIconEl = document.getElementById("ball-sensor-icon");
+  const ballTextEl = document.getElementById("ball-sensor-text");
+
   // 1. Target RPM & Duty Setpoint
   const speedCmd = Math.round(mappingConfig.shooterSpeed || 0);
   const setpointRpm = Math.round((speedCmd / 1000) * MAX_FLYWHEEL_RPM);
@@ -682,6 +687,34 @@ function updateSensorTelemetryUI() {
     } else {
       distValEl.textContent = "---.- cm";
       distAimSubEl.textContent = "Aim Heading: ---.-\u00B0";
+    }
+  }
+
+  // 6. IR Ball Presence Sensor & Conveyor Auto-Reverse Status
+  if (ballChipEl && ballIconEl && ballTextEl) {
+    const ballDetected =
+      typeof telem.ball_detected === "boolean"
+        ? telem.ball_detected
+        : latestConveyorState && typeof latestConveyorState.ball_detected === "boolean"
+          ? latestConveyorState.ball_detected
+          : null;
+    const isAutoRev = Boolean(latestConveyorState && latestConveyorState.auto_reversing);
+
+    ballChipEl.classList.remove("ball-chip-detected", "ball-chip-autorev");
+    if (ballDetected === true) {
+      ballChipEl.classList.add("ball-chip-detected");
+      ballIconEl.textContent = "sports_baseball";
+      ballTextEl.textContent = "Ball: DETECTED";
+    } else if (ballDetected === false && isAutoRev) {
+      ballChipEl.classList.add("ball-chip-autorev");
+      ballIconEl.textContent = "autorenew";
+      ballTextEl.textContent = "Ball: NONE (AUTO-REV)";
+    } else if (ballDetected === false) {
+      ballIconEl.textContent = "radio_button_unchecked";
+      ballTextEl.textContent = "Ball: NONE";
+    } else {
+      ballIconEl.textContent = "sensors_off";
+      ballTextEl.textContent = "Ball: ---";
     }
   }
 }
@@ -1253,8 +1286,15 @@ function controlTick() {
       : flywheel;
   document.getElementById("cmd-angle").textContent =
     angleRun ? (angleReversed ? "REV" : "FWD") : "OFF";
-  document.getElementById("cmd-conveyor").textContent =
-    `${trigger} | ${spinnerRun ? (spinnerReversed ? "REV" : "FWD") : "OFF"}`;
+  const conveyorSpinnerLabel =
+    latestConveyorState && latestConveyorState.auto_reversing
+      ? "AUTO-REV"
+      : spinnerRun
+        ? spinnerReversed
+          ? "REV"
+          : "FWD"
+        : "OFF";
+  document.getElementById("cmd-conveyor").textContent = `${trigger} | ${conveyorSpinnerLabel}`;
 
   uiAngleState.run = angleRun;
   uiAngleState.reversed = angleReversed;
@@ -1451,10 +1491,13 @@ function updateStatusFromWs(msg) {
   if (msg.shooter_pid) {
     latestShooterPidState = msg.shooter_pid;
   }
+  if (msg.conveyor) {
+    latestConveyorState = msg.conveyor;
+  }
   if (msg.telemetry) {
     latestTelemetryData = msg.telemetry;
     updateSensorTelemetryUI();
-  } else if (msg.shooter_pid) {
+  } else if (msg.shooter_pid || msg.conveyor) {
     updateSensorTelemetryUI();
   }
   if (msg.match) {
@@ -1482,10 +1525,13 @@ function initStatusPolling() {
         if (data.shooter_pid) {
           latestShooterPidState = data.shooter_pid;
         }
+        if (data.conveyor) {
+          latestConveyorState = data.conveyor;
+        }
         if (data.latest_telemetry) {
           latestTelemetryData = data.latest_telemetry;
           updateSensorTelemetryUI();
-        } else if (data.shooter_pid) {
+        } else if (data.shooter_pid || data.conveyor) {
           updateSensorTelemetryUI();
         }
         if (data.match) {
@@ -1783,6 +1829,7 @@ function initFieldPoseMap() {
   const hSlider = document.getElementById("sim-h-slider");
   const upperRpmSlider = document.getElementById("sim-upper-rpm-slider");
   const lowerRpmSlider = document.getElementById("sim-lower-rpm-slider");
+  const ballToggle = document.getElementById("sim-ball-detected-toggle");
 
   const updateSimLabels = () => {
     document.getElementById("sim-f-label").textContent = `${fSlider.value} cm`;
@@ -1797,6 +1844,10 @@ function initFieldPoseMap() {
       const lbl = document.getElementById("sim-lower-rpm-slider-label");
       if (lbl) lbl.textContent = `${lowerRpmSlider.value} RPM`;
     }
+    if (ballToggle) {
+      const lbl = document.getElementById("sim-ball-detected-label");
+      if (lbl) lbl.textContent = ballToggle.checked ? "BALL DETECTED (1)" : "NO BALL (0)";
+    }
   };
 
   const sendSimPose = async (f, l, r, h) => {
@@ -1807,6 +1858,7 @@ function initFieldPoseMap() {
         raw_heading_deg: Number(h),
         upper_rpm: upperRpmSlider ? Number(upperRpmSlider.value) : undefined,
         lower_rpm: lowerRpmSlider ? Number(lowerRpmSlider.value) : undefined,
+        ball_detected: ballToggle ? Boolean(ballToggle.checked) : undefined,
       };
       if (l !== null && l !== undefined) {
         payload.dist_left_cm = Number(l);
@@ -1820,7 +1872,7 @@ function initFieldPoseMap() {
         const data = await res.json();
         if (data.pose) updatePoseUI(data.pose);
         if (data.esp32) {
-          latestSensorTelemetry = { ...latestSensorTelemetry, ...data.esp32 };
+          latestTelemetryData = { ...(latestTelemetryData || {}), ...data.esp32 };
           updateSensorTelemetryUI();
         }
       }
@@ -1832,6 +1884,13 @@ function initFieldPoseMap() {
   for (const s of [fSlider, lSlider, rSlider, hSlider, upperRpmSlider, lowerRpmSlider]) {
     if (!s) continue;
     s.addEventListener("input", () => {
+      updateSimLabels();
+      sendSimPose(fSlider.value, lSlider.value, rSlider.value, hSlider.value);
+    });
+  }
+
+  if (ballToggle) {
+    ballToggle.addEventListener("change", () => {
       updateSimLabels();
       sendSimPose(fSlider.value, lSlider.value, rSlider.value, hSlider.value);
     });

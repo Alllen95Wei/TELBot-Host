@@ -318,6 +318,10 @@
 
             <!-- Auto (Distance) vs Manual Speed Mode Controls -->
             <div class="row wrap middle-align" style="gap: 6px;">
+              <span class="chip small" id="ball-sensor-chip" title="ESP32 IR Ball Sensor (ball_detected)">
+                <i id="ball-sensor-icon">sensors_off</i>
+                <span id="ball-sensor-text">Ball: ---</span>
+              </span>
               <span class="chip small" id="shooter-mode-chip">
                 <i id="shooter-mode-icon">hdr_auto</i>
                 <span id="shooter-mode-text">Mode: Auto (Dist)</span>
@@ -734,7 +738,7 @@
 
       <article class="round border">
         <div class="small-text bold" style="margin-bottom: 8px;">
-          ESP32 Sensor Telemetry Simulator (Front/Right/Left LiDAR, Heading &amp; Flywheel RPM)
+          ESP32 Sensor Telemetry Simulator (Front/Right/Left LiDAR, Heading, Flywheel RPM &amp; Ball IR Sensor)
         </div>
         <div class="grid">
           <div class="s6">
@@ -760,6 +764,15 @@
           <div class="s6">
             <label class="small-text">Lower Flywheel: <span class="mono bold" id="sim-lower-rpm-slider-label">4400 RPM</span></label>
             <input type="range" id="sim-lower-rpm-slider" min="0" max="5500" step="50" value="4400" style="width: 100%;" />
+          </div>
+          <div class="s12">
+            <div class="row middle-align" style="gap: 10px; margin-top: 4px;">
+              <label class="switch">
+                <input type="checkbox" id="sim-ball-detected-toggle" />
+                <span></span>
+              </label>
+              <span class="small-text">IR Ball Sensor (<code>ball_detected</code>): <span class="mono bold" id="sim-ball-detected-label">NO BALL (0)</span></span>
+            </div>
           </div>
         </div>
         <div class="row wrap" style="margin-top: 8px; gap: 6px;">

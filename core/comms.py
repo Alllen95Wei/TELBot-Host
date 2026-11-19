@@ -19,8 +19,8 @@ HEADER_SIZE = 6  # MAGIC (2B) + LEN (1B) + SEQ (1B) + CMD (1B) + PART (1B)
 MIN_PACKET_SIZE = HEADER_SIZE + 1  # Header + CRC8 (1B)
 MAX_PAYLOAD_SIZE = 240  # Well within 1-byte length limit (0-255)
 
-ESP32_TELEMETRY_FMT = "<hhhIII"
-ESP32_TELEMETRY_SIZE = 18
+ESP32_TELEMETRY_FMT = "<hhhIIIB"
+ESP32_TELEMETRY_SIZE = 19
 ESP32_INVALID_DIST_MM = 0xFFFFFFFF
 
 
@@ -333,8 +333,8 @@ class Packet:
         raise ValueError(f"Conveyor payload expected 2, 3, or 4 bytes, got {len(self.payload)}")
 
     # --- Sensor Telemetry (PartType.SENSORS) ---
-    ESP32_TELEMETRY_FMT = "<hhhIII"
-    ESP32_TELEMETRY_SIZE = 18
+    ESP32_TELEMETRY_FMT = "<hhhIIIB"
+    ESP32_TELEMETRY_SIZE = 19
     ESP32_INVALID_DIST_MM = 0xFFFFFFFF
 
     @classmethod
@@ -346,16 +346,18 @@ class Packet:
         dist_front_mm: int,
         dist_right_mm: int,
         dist_left_mm: int,
+        ball_detected: bool = False,
         seq: int = 0,
     ) -> "Packet":
         """
-        Packs 18-byte sensor telemetry from ESP32 to Host (<hhhIII):
+        Packs 19-byte sensor telemetry from ESP32 to Host (<hhhIIIB):
           upper_rpm:     int16  upper flywheel speed in RPM
           lower_rpm:     int16  lower flywheel speed in RPM
           heading_deg:   int16  geomagnetic heading relative to earth in degrees
           dist_front_mm: uint32 front LiDAR measured distance in mm (0xFFFFFFFF = invalid)
           dist_right_mm: uint32 right LiDAR measured distance in mm (0xFFFFFFFF = invalid)
           dist_left_mm:  uint32 left LiDAR measured distance in mm (0xFFFFFFFF = invalid)
+          ball_detected: uint8  IR ball presence sensor (0 = no ball, 1 = ball detected)
         """
         payload = struct.pack(
             cls.ESP32_TELEMETRY_FMT,
@@ -365,6 +367,7 @@ class Packet:
             int(dist_front_mm) & 0xFFFFFFFF,
             int(dist_right_mm) & 0xFFFFFFFF,
             int(dist_left_mm) & 0xFFFFFFFF,
+            1 if ball_detected else 0,
         )
         return cls(cmd=CmdType.TELEMETRY, part=PartType.SENSORS, payload=payload, seq=seq)
 
@@ -384,8 +387,8 @@ class Packet:
         """
         Unpacks telemetry payload into structured dictionary.
         Supports:
-          - 18-byte ESP32 sensor frame (<hhhIII):
-              (upper_rpm, lower_rpm, heading_deg, dist_front_mm, dist_right_mm, dist_left_mm)
+          - 19-byte ESP32 sensor frame (<hhhIIIB):
+              (upper_rpm, lower_rpm, heading_deg, dist_front_mm, dist_right_mm, dist_left_mm, ball_detected)
           - 5-byte Pico shooter step frame (<iB):
               (angle_steps, status_flags)
           - 4-byte Pico shooter step frame (<i):
@@ -401,6 +404,7 @@ class Packet:
                 dist_front_mm,
                 dist_right_mm,
                 dist_left_mm,
+                ball_detected_raw,
             ) = struct.unpack(self.ESP32_TELEMETRY_FMT, self.payload)
             front_valid = 0 < dist_front_mm < self.ESP32_INVALID_DIST_MM
             right_valid = 0 < dist_right_mm < self.ESP32_INVALID_DIST_MM
@@ -416,6 +420,7 @@ class Packet:
                 "dist_front_cm": round(dist_front_mm / 10.0, 1) if front_valid else None,
                 "dist_right_cm": round(dist_right_mm / 10.0, 1) if right_valid else None,
                 "dist_left_cm": round(dist_left_mm / 10.0, 1) if left_valid else None,
+                "ball_detected": bool(ball_detected_raw),
             }
         if len(self.payload) == 5:
             angle_steps, status = struct.unpack("<iB", self.payload)
@@ -1047,6 +1052,50 @@ if __name__ == "__main__":
     assert telem_data["shooter_steps"] == -340
     assert telem_data["status_flags"] == 1
     print(f"Telemetry Packet OK: {telem_data}")
+
+    # 4b. Test 26-Byte ESP32 Sensor Telemetry Packet (<hhhIIIB)
+    for expected_ball in (False, True):
+        pkt_esp = Packet.create_esp32_telemetry(
+            upper_rpm=4200,
+            lower_rpm=4150,
+            heading_deg=90,
+            dist_front_mm=3500,
+            dist_right_mm=2000,
+            dist_left_mm=0xFFFFFFFF,
+            ball_detected=expected_ball,
+            seq=21,
+        )
+        assert len(pkt_esp.payload) == 19
+        raw_esp = pkt_esp.encode()
+        assert len(raw_esp) == 26
+        dec_esp = Packet.decode(raw_esp)
+        assert dec_esp is not None
+        esp_data = dec_esp.parse_telemetry()
+        assert esp_data["source"] == "esp32"
+        assert esp_data["upper_rpm"] == 4200
+        assert esp_data["lower_rpm"] == 4150
+        assert esp_data["heading_deg"] == 90
+        assert esp_data["dist_front_cm"] == 350.0
+        assert esp_data["dist_right_cm"] == 200.0
+        assert esp_data["dist_left_cm"] is None
+        assert esp_data["ball_detected"] is expected_ball
+
+    # Non-zero raw byte in payload byte 18 decodes as True
+    raw_nonzero_payload = struct.pack("<hhhIIIB", 1000, 1000, 0, 1000, 1000, 1000, 0x05)
+    pkt_nonzero = Packet(cmd=CmdType.TELEMETRY, part=PartType.SENSORS, payload=raw_nonzero_payload, seq=22)
+    dec_nonzero = Packet.decode(pkt_nonzero.encode())
+    assert dec_nonzero is not None
+    assert dec_nonzero.parse_telemetry()["ball_detected"] is True
+
+    # Legacy 18-byte ESP32 payload must be rejected
+    legacy_payload = struct.pack("<hhhIII", 1000, 1000, 0, 1000, 1000, 1000)
+    pkt_legacy = Packet(cmd=CmdType.TELEMETRY, part=PartType.SENSORS, payload=legacy_payload, seq=23)
+    try:
+        pkt_legacy.parse_telemetry()
+        raise AssertionError("Expected 18-byte ESP32 payload to be rejected")
+    except ValueError:
+        pass
+    print("ESP32 26-byte Sensor Telemetry Packet OK!")
 
     # 5. Test Priority Queue & Purging
     comm = UARTComm(port="/dev/ttyAMA0")

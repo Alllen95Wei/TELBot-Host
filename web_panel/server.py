@@ -28,6 +28,7 @@ from config import ShooterPID as ShooterPIDConfig
 from config import SpecialGrid as SpecialGridConfig
 from config import UART as UARTConfig
 from core import (
+    ConveyorController,
     ESP32SensorReceiver,
     ESP32SensorSnapshot,
     MatchManager,
@@ -38,6 +39,7 @@ from core import (
     UARTComm,
     VisionManager,
     VisionTarget,
+    step_conveyor_control,
     step_shooter_control,
 )
 
@@ -53,10 +55,12 @@ uart = UARTComm(
 )
 pose_estimator = PoseEstimator()
 shooter_controller = ShooterSpeedController()
+conveyor_controller = ConveyorController()
 
 
 def _on_match_stop_with_comm(comm_ref: UARTComm) -> None:
     get_shooter_controller().stop()
+    get_conveyor_controller().stop()
     comm_ref.send_stop()
 
 
@@ -156,6 +160,18 @@ def get_shooter_controller() -> ShooterSpeedController:
     return getattr(app.state, "shooter_controller", shooter_controller)
 
 
+def set_conveyor_controller(controller: ConveyorController) -> None:
+    """Injects an externally managed ConveyorController instance (used by main.py)."""
+    global conveyor_controller
+    conveyor_controller = controller
+    app.state.conveyor_controller = controller
+
+
+def get_conveyor_controller() -> ConveyorController:
+    """Returns the active ConveyorController instance."""
+    return getattr(app.state, "conveyor_controller", conveyor_controller)
+
+
 def _build_combined_telemetry() -> Optional[dict]:
     """
     Merges latest telemetry from Pico UART and ESP32 Sensor UART into a single
@@ -186,9 +202,11 @@ def _build_combined_telemetry() -> Optional[dict]:
             combined["dist_front_cm"] = snap_dict["dist_front_cm"]
             combined["dist_right_cm"] = snap_dict["dist_right_cm"]
             combined["dist_left_cm"] = snap_dict["dist_left_cm"]
+            combined["ball_detected"] = snap_dict["ball_detected"]
 
     if combined:
         combined["shooter_pid"] = get_shooter_controller().get_status()
+        combined["conveyor"] = get_conveyor_controller().get_status()
         return combined
     return None
 
@@ -230,16 +248,30 @@ async def lifespan(app: FastAPI):
         async def _standalone_shooter_pid_loop() -> None:
             tick_interval = 1.0 / max(1.0, float(ShooterPIDConfig.CONTROL_LOOP_HZ))
             last_sent_flywheel = (0, 0)
+            last_sent_spinner = (False, False)
             while True:
                 loop_start = time.monotonic()
+                comm_ref = get_uart_comm()
+                match_ref = get_match_manager()
+                esp32_ref = get_esp32_receiver()
+                shooter_ref = get_shooter_controller()
                 last_sent_flywheel = step_shooter_control(
-                    controller=get_shooter_controller(),
-                    uart=get_uart_comm(),
-                    match_manager=get_match_manager(),
+                    controller=shooter_ref,
+                    uart=comm_ref,
+                    match_manager=match_ref,
                     pose_estimator=get_pose_estimator(),
                     vision_manager=get_vision_manager(),
-                    esp32_receiver=get_esp32_receiver(),
+                    esp32_receiver=esp32_ref,
                     last_sent_flywheel=last_sent_flywheel,
+                    now=loop_start,
+                )
+                last_sent_spinner = step_conveyor_control(
+                    conveyor_controller=get_conveyor_controller(),
+                    shooter_controller=shooter_ref,
+                    uart=comm_ref,
+                    match_manager=match_ref,
+                    esp32_receiver=esp32_ref,
+                    last_sent_spinner=last_sent_spinner,
                     now=loop_start,
                 )
                 elapsed = time.monotonic() - loop_start
@@ -255,6 +287,7 @@ async def lifespan(app: FastAPI):
         pid_task.cancel()
         await asyncio.gather(pid_task, return_exceptions=True)
         get_shooter_controller().stop()
+        get_conveyor_controller().stop()
 
     # Terminate any active uStreamer proxy connections on server shutdown
     for w in list(_active_stream_writers):
@@ -402,6 +435,14 @@ class ConveyorSpinnerRequest(BaseModel):
     reversed: bool = Field(default=False, description="Whether spinner direction is reversed")
 
 
+class ConveyorAutoReverseUpdateRequest(BaseModel):
+    enabled: Optional[bool] = Field(default=None, description="Enable or disable automatic spinner anti-jam reverse")
+    no_ball_delay_s: Optional[float] = Field(default=None, ge=0.0, description="Continuous no-ball time while shooting before reversing (seconds)")
+    reverse_duration_s: Optional[float] = Field(default=None, ge=0.0, description="Duration of each automatic reverse pulse (seconds)")
+    cooldown_s: Optional[float] = Field(default=None, ge=0.0, description="Normal dwell time between consecutive reverse pulses (seconds)")
+    reset: bool = Field(default=False, description="Reset auto-reverse state machine back to idle")
+
+
 class StopRequest(BaseModel):
     part: int = Field(
         default=PartType.ALL.value,
@@ -423,6 +464,9 @@ class PoseSensorUpdateRequest(BaseModel):
     lower_rpm: Optional[int] = Field(
         default=None, description="Optional simulated lower flywheel speed in RPM"
     )
+    ball_detected: Optional[bool] = Field(
+        default=None, description="Optional simulated IR ball sensor state"
+    )
 
 
 class ESP32TelemetrySimulateRequest(BaseModel):
@@ -437,6 +481,9 @@ class ESP32TelemetrySimulateRequest(BaseModel):
     )
     dist_left_mm: int = Field(
         default=2000, ge=0, le=0xFFFFFFFF, description="Left LiDAR distance (mm)"
+    )
+    ball_detected: bool = Field(
+        default=False, description="IR ball sensor state (False=no ball, True=ball detected)"
     )
 
 
@@ -487,6 +534,7 @@ def get_status():
         "latest_telemetry": parsed_telem,
         "pose": latest_pose.to_dict() if latest_pose is not None else None,
         "shooter_pid": get_shooter_controller().get_status(),
+        "conveyor": get_conveyor_controller().get_status(),
     }
 
 
@@ -582,20 +630,28 @@ def get_pose():
 
 @app.post("/api/pose/update")
 def update_pose(req: PoseSensorUpdateRequest):
-    """Updates the pose estimator with Front, Right & Left LiDAR distances (cm), geomagnetic heading (deg), and optional simulated RPMs."""
-    if req.upper_rpm is not None or req.lower_rpm is not None:
+    """Updates the pose estimator with Front, Right & Left LiDAR distances (cm), geomagnetic heading (deg), and optional simulated RPMs / IR ball state."""
+    if req.upper_rpm is not None or req.lower_rpm is not None or req.ball_detected is not None:
         left_mm = (
             max(0, int(round(req.dist_left_cm * 10.0)))
             if req.dist_left_cm is not None
             else 0xFFFFFFFF
         )
-        snap = get_esp32_receiver().inject_telemetry(
+        esp32_rx = get_esp32_receiver()
+        latest_snap = esp32_rx.latest_snapshot
+        ball_detected = (
+            bool(req.ball_detected)
+            if req.ball_detected is not None
+            else (bool(latest_snap.ball_detected) if latest_snap is not None else False)
+        )
+        snap = esp32_rx.inject_telemetry(
             upper_rpm=int(req.upper_rpm or 0),
             lower_rpm=int(req.lower_rpm or 0),
             heading_deg=int(round(req.raw_heading_deg)),
             dist_front_mm=max(0, int(round(req.dist_front_cm * 10.0))),
             dist_right_mm=max(0, int(round(req.dist_right_cm * 10.0))),
             dist_left_mm=left_mm,
+            ball_detected=ball_detected,
         )
         latest_pose = get_pose_estimator().latest_pose
         return {
@@ -617,7 +673,7 @@ def update_pose(req: PoseSensorUpdateRequest):
 @app.post("/api/esp32/simulate")
 def simulate_esp32_telemetry(req: ESP32TelemetrySimulateRequest):
     """
-    Encodes a 25-byte binary ESP32 sensor frame (<hhhIII + CRC8) and feeds it
+    Encodes a 26-byte binary ESP32 sensor frame (<hhhIIIB + CRC8) and feeds it
     through the ESP32SensorReceiver parser and PoseEstimator pipeline.
     """
     snap = get_esp32_receiver().inject_telemetry(
@@ -627,6 +683,7 @@ def simulate_esp32_telemetry(req: ESP32TelemetrySimulateRequest):
         dist_front_mm=req.dist_front_mm,
         dist_right_mm=req.dist_right_mm,
         dist_left_mm=req.dist_left_mm,
+        ball_detected=req.ball_detected,
     )
     latest_pose = get_pose_estimator().latest_pose
     return {
@@ -823,17 +880,24 @@ def control_conveyor(req: ConveyorRequest):
     Controls all conveyor components: trigger motor speed and spinner state (run, reversed).
     """
     comm = _require_teleop_allowed()
-    comm.send_conveyor_command(
+    ctrl = get_conveyor_controller()
+    eff_trig, eff_run, eff_rev = ctrl.set_operator_command(
         trigger=req.trigger,
         spinner_run=req.spinner_run,
         spinner_reversed=req.spinner_reversed,
     )
+    comm.send_conveyor_command(
+        trigger=eff_trig,
+        spinner_run=eff_run,
+        spinner_reversed=eff_rev,
+    )
     return {
         "status": "enqueued",
         "subsystem": "conveyor",
-        "trigger": req.trigger,
-        "spinner_run": req.spinner_run,
-        "spinner_reversed": req.spinner_reversed,
+        "trigger": eff_trig,
+        "spinner_run": eff_run,
+        "spinner_reversed": eff_rev,
+        "conveyor": ctrl.get_status(),
     }
 
 
@@ -843,8 +907,9 @@ def control_conveyor_trigger(req: ConveyorTriggerRequest):
     Sets only the conveyor trigger motor speed.
     """
     comm = _require_teleop_allowed()
-    comm.send_conveyor_trigger(speed=req.speed)
-    return {"status": "enqueued", "subsystem": "conveyor", "trigger": req.speed}
+    eff_trig = get_conveyor_controller().set_operator_trigger(req.speed)
+    comm.send_conveyor_trigger(speed=eff_trig)
+    return {"status": "enqueued", "subsystem": "conveyor", "trigger": eff_trig}
 
 
 @app.post("/api/conveyor/spinner")
@@ -853,12 +918,53 @@ def control_conveyor_spinner(req: ConveyorSpinnerRequest):
     Sets only the conveyor spinner state (run: bool, reversed: bool).
     """
     comm = _require_teleop_allowed()
-    comm.send_conveyor_spinner(run=req.run, reversed=req.reversed)
+    ctrl = get_conveyor_controller()
+    eff_run, eff_rev = ctrl.set_operator_spinner(run=req.run, reversed=req.reversed)
+    comm.send_conveyor_spinner(run=eff_run, reversed=eff_rev)
     return {
         "status": "enqueued",
         "subsystem": "conveyor",
-        "spinner_run": req.run,
-        "spinner_reversed": req.reversed,
+        "spinner_run": eff_run,
+        "spinner_reversed": eff_rev,
+        "conveyor": ctrl.get_status(),
+    }
+
+
+@app.get("/api/conveyor/auto_reverse")
+def get_conveyor_auto_reverse():
+    """Returns automatic spinner anti-jam reverse state and timing configuration."""
+    ctrl = get_conveyor_controller()
+    return {
+        "status": "ok",
+        "state": ctrl.get_status(),
+        "config": ctrl.get_config(),
+    }
+
+
+@app.post("/api/conveyor/auto_reverse")
+def update_conveyor_auto_reverse(req: ConveyorAutoReverseUpdateRequest):
+    """Updates automatic spinner anti-jam reverse parameters at runtime."""
+    ctrl = get_conveyor_controller()
+    try:
+        if any(
+            v is not None
+            for v in (req.enabled, req.no_ball_delay_s, req.reverse_duration_s, req.cooldown_s)
+        ):
+            ctrl.set_config(
+                enabled=req.enabled,
+                no_ball_delay_s=req.no_ball_delay_s,
+                reverse_duration_s=req.reverse_duration_s,
+                cooldown_s=req.cooldown_s,
+            )
+        if req.reset:
+            ctrl.reset_auto_reverse()
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {
+        "status": "ok",
+        "state": ctrl.get_status(),
+        "config": ctrl.get_config(),
     }
 
 
@@ -871,6 +977,8 @@ def stop_robot(req: StopRequest):
     part = PartType(req.part)
     if part in (PartType.ALL, PartType.SHOOTER):
         get_shooter_controller().stop()
+    if part in (PartType.ALL, PartType.CONVEYOR):
+        get_conveyor_controller().stop()
     comm = get_uart_comm()
     comm.send_stop(part=part, clear_pending_drive=req.clear_pending_drive)
     return {"status": "stopped", "part": req.part, "estop_active": comm.estop_active}
@@ -1107,10 +1215,15 @@ async def websocket_control(websocket: WebSocket):
                 trigger = int(data.get("trigger", 0))
                 spinner_run = bool(data.get("spinner_run", False))
                 spinner_reversed = bool(data.get("spinner_reversed", False))
-                accepted = comm.send_conveyor_command(
+                eff_trig, eff_run, eff_rev = get_conveyor_controller().set_operator_command(
                     trigger=trigger,
                     spinner_run=spinner_run,
                     spinner_reversed=spinner_reversed,
+                )
+                accepted = comm.send_conveyor_command(
+                    trigger=eff_trig,
+                    spinner_run=eff_run,
+                    spinner_reversed=eff_rev,
                 )
 
             elif msg_type == "stop":
@@ -1118,6 +1231,8 @@ async def websocket_control(websocket: WebSocket):
                 part = PartType(part_val)
                 if part in (PartType.ALL, PartType.SHOOTER):
                     get_shooter_controller().stop()
+                if part in (PartType.ALL, PartType.CONVEYOR):
+                    get_conveyor_controller().stop()
                 comm.send_stop(part=part)
 
             elif msg_type == "vision":
@@ -1149,13 +1264,16 @@ async def websocket_control(websocket: WebSocket):
                 "telemetry": parsed_telem,
                 "pose": latest_pose.to_dict() if latest_pose is not None else None,
                 "shooter_pid": get_shooter_controller().get_status(),
+                "conveyor": get_conveyor_controller().get_status(),
             })
 
     except WebSocketDisconnect:
         logger.info("WebSocket client disconnected. Issuing safety stop...")
         get_shooter_controller().stop()
+        get_conveyor_controller().stop()
         comm.send_stop()
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
         get_shooter_controller().stop()
+        get_conveyor_controller().stop()
         comm.send_stop()

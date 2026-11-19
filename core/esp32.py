@@ -1,16 +1,17 @@
 """
 core/esp32.py - ESP32 UART Sensor Telemetry Receiver for TELBot Host
 
-Receives 25-byte binary sensor telemetry frames over UART (115200 baud, 8N1)
+Receives 26-byte binary sensor telemetry frames over UART (115200 baud, 8N1)
 from the ESP32 coprocessor:
-  - Header (6B): 0xAA, 0x55, LENGTH=18, SEQ, CMD=4 (TELEMETRY), PART=4 (SENSORS)
-  - Payload (18B, little-endian <hhhIII):
+  - Header (6B): 0xAA, 0x55, LENGTH=19, SEQ, CMD=4 (TELEMETRY), PART=4 (SENSORS)
+  - Payload (19B, little-endian <hhhIIIB):
       * upper_rpm     (int16):  Upper flywheel speed in RPM
       * lower_rpm     (int16):  Lower flywheel speed in RPM
       * heading_deg   (int16):  Earth-relative magnetic heading in degrees
       * dist_front_mm (uint32): Front LiDAR measured distance in mm
       * dist_right_mm (uint32): Right LiDAR measured distance in mm
       * dist_left_mm  (uint32): Left LiDAR measured distance in mm
+      * ball_detected (uint8):  IR ball presence sensor (0 = no ball, 1 = ball detected)
   - Footer (1B): CRC-8 (poly=0x07, init=0x00) over [LENGTH..PAYLOAD]
 """
 
@@ -52,6 +53,7 @@ class ESP32SensorSnapshot:
     seq: int
     timestamp: float  # time.monotonic() when received
     wall_time: float  # time.time() when received
+    ball_detected: bool = False
 
     def is_fresh(self, stale_timeout_s: float = ESP32Config.STALE_TIMEOUT_S) -> bool:
         return (time.monotonic() - self.timestamp) <= stale_timeout_s
@@ -69,6 +71,7 @@ class ESP32SensorSnapshot:
             "dist_front_cm": self.dist_front_cm,
             "dist_right_cm": self.dist_right_cm,
             "dist_left_cm": self.dist_left_cm,
+            "ball_detected": self.ball_detected,
             "seq": self.seq,
             "age_ms": round(age_s * 1000.0, 1),
             "stale": age_s > stale_timeout_s,
@@ -243,6 +246,7 @@ class ESP32SensorReceiver:
         dist_front_mm: int,
         dist_right_mm: int,
         dist_left_mm: int,
+        ball_detected: bool = False,
         seq: int = 0,
     ) -> ESP32SensorSnapshot:
         """
@@ -256,6 +260,7 @@ class ESP32SensorReceiver:
             dist_front_mm=dist_front_mm,
             dist_right_mm=dist_right_mm,
             dist_left_mm=dist_left_mm,
+            ball_detected=ball_detected,
             seq=seq,
         )
         snaps = self.feed_bytes(pkt.encode())
@@ -279,6 +284,7 @@ class ESP32SensorReceiver:
             seq=int(seq) & 0xFF,
             timestamp=now_mono,
             wall_time=now_wall,
+            ball_detected=bool(parsed.get("ball_detected", False)),
         )
 
         with self._lock:

@@ -142,3 +142,12 @@ class ShooterPID:
         (380.0, 4750.0),
         (450.0, 5200.0),
     )
+
+
+class ConveyorAutoReverse:
+    """Automatic spinner anti-jam reverse when shooter is running with no ball detected."""
+
+    ENABLED = True
+    NO_BALL_DELAY_S = 0.5      # Continuous no-ball time while shooting before auto-reverse triggers
+    REVERSE_DURATION_S = 0.4   # Duration of each automatic reverse pulse
+    COOLDOWN_S = 1.0           # Normal/forward dwell time before triggering another pulse if still no ball
