@@ -60,11 +60,11 @@ When Auto expires, the robot immediately stops all motors and enters `AUTO_WAIT`
 ## Undone Tasks
 
 1. **Chassis Pose-to-Point PID Controller (`core/control.py`)**:
-   - Closed-loop Chassis Pose-to-Point PID (`ChassisPoseController`) for autonomous field navigation.
+   - Closed-loop Chassis Pose-to-Point PID (`ChassisPoseController`) for autonomous field navigation — see [CHASSIS_P2P_PID.md](docs/CHASSIS_P2P_PID.md) for the complete design (`PRACTICE` + internal `AUTO` only, blind-LiDAR pauses translation while allowing heading rotation, `stop_on_arrival=True` by default).
 2. **ESP32 Sender Firmware Implementation (Planned)**:
-   - Implement ESP32 firmware to read Upper/Lower flywheel RPMs, geomagnetic heading (deg), Front/Right/Left LiDAR distances (mm), and IR ball sensor state (`ball_detected`), pack the 26-byte `<hhhIIIB` frame with CRC-8 (`0x07`), and transmit at 50 Hz over 115200 baud UART to RPi 5.
+   - Implement ESP32 firmware to read Upper/Lower flywheel RPMs, geomagnetic heading (deg), Front/Right/Left LiDAR distances (mm), and IR ball sensor state (`ball_detected`), pack the 26-byte `<hhhIIIB` frame with CRC-8 (`0x07`), and transmit at 50 Hz over 115200 baud UART to RPi 5 — see [ESP32.md](docs/ESP32.md) for full wire protocol & reference C++ sender code.
 3. **Autonomous Routine Storage & Workflow**:
-   - Sequence runner executing fixed steps during the 1:00 Auto phase (e.g. drive to point $\to$ align $\to$ spin up flywheels $\to$ feed balls).
+   - Sequence runner executing fixed steps during the 1:00 Auto phase (e.g. drive to point $\to$ align $\to$ spin up flywheels $\to$ feed balls), authored via an interactive **Web UI editor** (backed by structured JSON routine definitions on the Host).
 
 ---
 
@@ -80,16 +80,16 @@ When Auto expires, the robot immediately stops all motors and enters `AUTO_WAIT`
   - Continuous angle wrapping for heading control across $0^\circ / 360^\circ$ boundary.
   - Immediate `reset()` when target is 0 or subsystem is stopped.
 
-## 2. Chassis Pose-to-Point PID (`ChassisPoseController` in `core/control.py`) — [TODO]
+## 2. Chassis Pose-to-Point PID (`ChassisPoseController` in `core/control.py`) — [TODO — Plan in [CHASSIS_P2P_PID.md](docs/CHASSIS_P2P_PID.md)]
 - **Inputs**: Current field pose $(x_{\text{cm}}, y_{\text{cm}}, \theta_{\text{deg}})$ from `PoseEstimator.latest_pose`.
-- **Target**: `(target_x_cm, target_y_cm, target_heading_deg)`.
+- **Target**: `(target_x_cm, target_y_cm, target_heading_deg)` (with `stop_on_arrival=True` by default).
 - **3 Independent Axes**:
   - $X$-axis PID: $e_x = x_{\text{target}} - x_{\text{cm}} \to u_X$
   - $Y$-axis PID: $e_y = y_{\text{target}} - y_{\text{cm}} \to u_Y$
   - Heading PID: wrapped angular error $e_\theta \to \omega$
 - **Coordinate Transformation**: Rotate field velocities $(u_X, u_Y)$ into robot body frame ($v_x$ forward, $v_y$ strafe) matching $0^\circ = +Y$, $90^\circ = +X$:
   $$v_x = u_Y \cos\theta + u_X \sin\theta, \qquad v_y = u_X \cos\theta - u_Y \sin\theta$$
-- **Safety**: Auto-zero output on stale/invalid pose; `is_at_target()` check with configurable tolerances.
+- **Safety & Access**: Only active in `PRACTICE` (Web/REST `/api/chassis/goto` with driver preemption) and internal `AUTO` routines; auto-zero all axes on stale/invalid pose; pause translation while allowing heading rotation if LiDAR rays drop (`no_valid_beam` / `*_rejected*`); `is_at_target()` dwell settle check.
 
 ## 3. Dual Flywheel RPM PID + Distance Auto-Speed (`ShooterSpeedController` in `core/control.py`) — [DONE]
 - **Shared Target**: Operator and auto-distance logic produce **one shared setpoint** ($0 \sim 5500$ RPM).
@@ -121,7 +121,7 @@ When Auto expires, the robot immediately stops all motors and enters `AUTO_WAIT`
 
 ---
 
-# ESP32 Sensor Telemetry Plan & Specification
+# ESP32 Sensor Telemetry Plan & Specification (see [ESP32.md](docs/ESP32.md))
 
 ## 1. Host-Side Receiver (`core/esp32.py`, `core/comms.py`, `core/pose.py`) — [DONE]
 - **Physical Link**: 115200 baud, `8N1` UART (`/dev/ttyAMA1` or `/dev/ttyUSB0`, configurable via `--esp32-port` and `--esp32-baud`).
@@ -154,4 +154,4 @@ When Auto expires, the robot immediately stops all motors and enters `AUTO_WAIT`
 - **Geomagnetic Heading**: Relative vs absolute azimuth calibration before match start.
 
 ## 2. Autonomous Routine Storage
-- Routine definition format: JSON sequence file vs Python script vs interactive Web UI editor.
+- **Chosen Approach**: Interactive **Web UI editor** backed by structured JSON routine definitions stored on the Host (executed by the 1:00 `AUTO` sequence runner).

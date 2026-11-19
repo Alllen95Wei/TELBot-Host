@@ -1,6 +1,7 @@
 # ESP32 $\leftrightarrow$ RPi 5 UART Sensor Telemetry Plan
 
 This document specifies the **Host-Side (RPi 5)** implementation and the **ESP32 Sender Firmware** plan for streaming sensor telemetry over **115200 baud** UART (`8N1`).
+For overall project context and task tracking, see [AGENTS.md](../AGENTS.md); for autonomous chassis navigation using this telemetry, see [CHASSIS_P2P_PID.md](CHASSIS_P2P_PID.md).
 
 ---
 
@@ -9,7 +10,7 @@ This document specifies the **Host-Side (RPi 5)** implementation and the **ESP32
 - **Baud Rate**: `115200` baud, `8N1`, no flow control
 - **Default Host Device**: `/dev/ttyAMA1` (configurable via `config.ESP32.PORT` or `--esp32-port` / `--esp32-baud` CLI flags)
 - **Update Rate**: `50 Hz` (`20 ms` period; `26 bytes` $\times 10\text{ bits/byte} \times 50\text{ Hz} = 13,000\text{ bps} \approx 11.3\%$ of 115200 baud capacity)
-- **Framing**: Reuses the binary `Packet` / `PacketParser` framing in [comms.py](file:///home/ubuntu/TELBot-Host/core/comms.py) with CRC-8 (`0x07` polynomial, init `0x00`).
+- **Framing**: Reuses the binary `Packet` / `PacketParser` framing in [comms.py](../core/comms.py) with CRC-8 (`0x07` polynomial, init `0x00`).
 
 ### 26-Byte Frame Layout (`<hhhIIIB` Payload = 19 Bytes)
 
@@ -44,14 +45,14 @@ flowchart LR
     Server --> UI["Web Console Telemetry & 2D Map\n(web_panel/static/app.js)"]
 ```
 
-- **Protocol & Framing ([core/comms.py](file:///home/ubuntu/TELBot-Host/core/comms.py))**:
+- **Protocol & Framing ([core/comms.py](../core/comms.py))**:
   - `ESP32_TELEMETRY_FMT = "<hhhIIIB"`, `ESP32_TELEMETRY_SIZE = 19`, `ESP32_INVALID_DIST_MM = 0xFFFFFFFF`.
   - `Packet.create_esp32_telemetry()` and `Packet.parse_telemetry()` unpack `upper_rpm`, `lower_rpm`, `heading_deg`, `dist_front_mm`, `dist_right_mm`, `dist_left_mm`, and `ball_detected` (`bool`), and compute `dist_front_cm`, `dist_right_cm`, and `dist_left_cm`.
-- **Receiver Worker ([core/esp32.py](file:///home/ubuntu/TELBot-Host/core/esp32.py))**:
+- **Receiver Worker ([core/esp32.py](../core/esp32.py))**:
   - `ESP32SensorReceiver` runs a dedicated daemon RX thread with auto-reconnect, `PacketParser` stream decoding, staleness tracking (`STALE_TIMEOUT_S = 0.5`), and `inject_telemetry()` for testing.
-- **3-LiDAR Pose Localization ([core/pose.py](file:///home/ubuntu/TELBot-Host/core/pose.py))**:
+- **3-LiDAR Pose Localization ([core/pose.py](../core/pose.py))**:
   - `PoseEstimator.update_from_mm(dist_front_mm, dist_right_mm, dist_left_mm, raw_heading_deg)` converts `mm` to `cm` and fuses Front ($0^\circ$), Right ($+90^\circ$), and Left ($-90^\circ$) beams with opposite-pair discrepancy validation and delta-based obstacle rejection.
-- **Automatic Spinner Anti-Jam Reverse ([core/control.py](file:///home/ubuntu/TELBot-Host/core/control.py))**:
+- **Automatic Spinner Anti-Jam Reverse ([core/control.py](../core/control.py))**:
   - `ConveyorController` / `step_conveyor_control()` monitors `ball_detected` at 50 Hz while the shooter is running; if `ball_detected == False` continuously for `ConveyorAutoReverse.NO_BALL_DELAY_S`, it automatically reverses the conveyor spinner for `REVERSE_DURATION_S` (with `COOLDOWN_S` between pulses) and cancels immediately once a ball is detected or the shooter stops.
 
 ---
