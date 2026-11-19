@@ -210,24 +210,39 @@ class Packet:
     @classmethod
     def create_shooter_command(
         cls,
-        flywheel: int,
+        flywheel: int = 0,
         angle_run: bool = False,
         angle_reversed: bool = False,
         seq: int = 0,
+        *,
+        upper_flywheel: Optional[int] = None,
+        lower_flywheel: Optional[int] = None,
     ) -> "Packet":
         """
-        Full control of Shooter subsystem:
-        flywheel: flywheel velocity (-1000 to +1000)
+        Full control of Shooter subsystem (<hhBB, 6 bytes):
+        upper_flywheel: upper flywheel velocity (-1000 to +1000), defaults to flywheel
+        lower_flywheel: lower flywheel velocity (-1000 to +1000), defaults to upper_flywheel
         angle_run: whether pitch angle stepper (TB6560) is running
         angle_reversed: whether pitch angle direction is reversed
         """
-        payload = struct.pack("<hBB", flywheel, int(bool(angle_run)), int(bool(angle_reversed)))
+        upper = int(flywheel if upper_flywheel is None else upper_flywheel)
+        lower = int(upper if lower_flywheel is None else lower_flywheel)
+        payload = struct.pack(
+            "<hhBB", upper, lower, int(bool(angle_run)), int(bool(angle_reversed))
+        )
         return cls(cmd=CmdType.RUN, part=PartType.SHOOTER, payload=payload, seq=seq)
 
     @classmethod
-    def create_shooter_flywheel(cls, speed: int, seq: int = 0) -> "Packet":
-        """Sets shooter flywheel speed only (-1000 to +1000)."""
-        payload = struct.pack("<h", speed)
+    def create_shooter_flywheel(
+        cls,
+        speed: int = 0,
+        lower_speed: Optional[int] = None,
+        seq: int = 0,
+    ) -> "Packet":
+        """Sets shooter upper and lower flywheel speeds (<hh, 4 bytes, -1000 to +1000)."""
+        upper = int(speed)
+        lower = int(upper if lower_speed is None else lower_speed)
+        payload = struct.pack("<hh", upper, lower)
         return cls(cmd=CmdType.RUN, part=PartType.SHOOTER, payload=payload, seq=seq)
 
     @classmethod
@@ -244,27 +259,31 @@ class Packet:
         payload = struct.pack("<B", 0)
         return cls(cmd=CmdType.RUN, part=PartType.SHOOTER, payload=payload, seq=seq)
 
-    def parse_shooter_command(self) -> Tuple[int, bool, bool]:
+    def parse_shooter_command(self) -> Tuple[int, int, bool, bool]:
         """
-        Unpacks shooter command.
-        If payload has 4 bytes (<hBB): returns (flywheel, angle_run, angle_reversed).
-        If payload has 3 bytes (<BBB): returns (0, angle_run, angle_reversed).
-        If payload has 2 bytes (<h): returns (flywheel, False, False).
-        If payload has 1 byte (<B): returns (0, False, False).
+        Unpacks shooter command into (upper_flywheel, lower_flywheel, angle_run, angle_reversed).
+        If payload has 6 bytes (<hhBB): returns (upper, lower, angle_run, angle_reversed).
+        If payload has 4 bytes (<hh): returns (upper, lower, False, False).
+        If payload has 3 bytes (<BBB): returns (0, 0, angle_run, angle_reversed).
+        If payload has 2 bytes (<h): returns (flywheel, flywheel, False, False).
+        If payload has 1 byte (<B): returns (0, 0, False, False).
         """
-        if len(self.payload) == 4:
-            flywheel, run, rev = struct.unpack("<hBB", self.payload)
-            return (flywheel, bool(run), bool(rev))
+        if len(self.payload) == 6:
+            upper, lower, run, rev = struct.unpack("<hhBB", self.payload)
+            return (upper, lower, bool(run), bool(rev))
+        elif len(self.payload) == 4:
+            upper, lower = struct.unpack("<hh", self.payload)
+            return (upper, lower, False, False)
         elif len(self.payload) == 3:
             _, run, rev = struct.unpack("<BBB", self.payload)
-            return (0, bool(run), bool(rev))
+            return (0, 0, bool(run), bool(rev))
         elif len(self.payload) == 2:
             (flywheel,) = struct.unpack("<h", self.payload)
-            return (flywheel, False, False)
+            return (flywheel, flywheel, False, False)
         elif len(self.payload) == 1:
-            return (0, False, False)
+            return (0, 0, False, False)
         raise ValueError(
-            f"Shooter payload expected 1, 2, 3, or 4 bytes, got {len(self.payload)}"
+            f"Shooter payload expected 1, 2, 3, 4, or 6 bytes, got {len(self.payload)}"
         )
 
     # --- Conveyor Subsystem (PartType.CONVEYOR) ---
@@ -718,20 +737,29 @@ class UARTComm:
 
     def send_shooter_command(
         self,
-        flywheel: int,
+        flywheel: int = 0,
         angle_run: bool = False,
         angle_reversed: bool = False,
         priority: int = 2,
+        *,
+        upper_flywheel: Optional[int] = None,
+        lower_flywheel: Optional[int] = None,
     ) -> bool:
-        """Enqueues a full shooter command (flywheel speed, angle run, angle reversed)."""
+        """Enqueues a full shooter command (upper/lower flywheel speeds, angle run, angle reversed)."""
         pkt = Packet.create_shooter_command(
-            flywheel=flywheel, angle_run=angle_run, angle_reversed=angle_reversed
+            flywheel=flywheel,
+            angle_run=angle_run,
+            angle_reversed=angle_reversed,
+            upper_flywheel=upper_flywheel,
+            lower_flywheel=lower_flywheel,
         )
         return self.send_packet(pkt, priority=priority)
 
-    def send_shooter_flywheel(self, speed: int, priority: int = 2) -> bool:
-        """Enqueues a shooter flywheel command."""
-        pkt = Packet.create_shooter_flywheel(speed=speed)
+    def send_shooter_flywheel(
+        self, speed: int = 0, lower_speed: Optional[int] = None, priority: int = 2
+    ) -> bool:
+        """Enqueues a shooter flywheel command (symmetric or independent upper/lower speeds)."""
+        pkt = Packet.create_shooter_flywheel(speed=speed, lower_speed=lower_speed)
         return self.send_packet(pkt, priority=priority)
 
     def send_shooter_angle(
@@ -968,19 +996,37 @@ if __name__ == "__main__":
     assert dec_chassis.parse_chassis_drive() == (500, -200, 100)
     print(f"Chassis Packet OK: {dec_chassis}")
 
-    # 2. Test Shooter Command Packet
+    # 2. Test Shooter Command Packet (6B full dual, 4B dual flywheel, 3B angle, 1B disable)
     pkt_shooter = Packet.create_shooter_command(
-        flywheel=850, angle_run=True, angle_reversed=True, seq=11
+        flywheel=850,
+        upper_flywheel=860,
+        lower_flywheel=820,
+        angle_run=True,
+        angle_reversed=True,
+        seq=11,
     )
-    raw_shooter = pkt_shooter.encode()
-    dec_shooter = Packet.decode(raw_shooter)
+    assert len(pkt_shooter.payload) == 6
+    dec_shooter = Packet.decode(pkt_shooter.encode())
     assert dec_shooter is not None
-    assert dec_shooter.parse_shooter_command() == (850, True, True)
+    assert dec_shooter.parse_shooter_command() == (860, 820, True, True)
+
+    pkt_shooter_fw = Packet.create_shooter_flywheel(speed=800, lower_speed=760, seq=15)
+    assert len(pkt_shooter_fw.payload) == 4
+    dec_shooter_fw = Packet.decode(pkt_shooter_fw.encode())
+    assert dec_shooter_fw is not None
+    assert dec_shooter_fw.parse_shooter_command() == (800, 760, False, False)
 
     pkt_shooter_angle = Packet.create_shooter_angle(run=True, reversed=False, seq=14)
+    assert len(pkt_shooter_angle.payload) == 3
     dec_shooter_angle = Packet.decode(pkt_shooter_angle.encode())
     assert dec_shooter_angle is not None
-    assert dec_shooter_angle.parse_shooter_command() == (0, True, False)
+    assert dec_shooter_angle.parse_shooter_command() == (0, 0, True, False)
+
+    pkt_shooter_dis = Packet.create_shooter_disable_angle(seq=16)
+    assert len(pkt_shooter_dis.payload) == 1
+    dec_shooter_dis = Packet.decode(pkt_shooter_dis.encode())
+    assert dec_shooter_dis is not None
+    assert dec_shooter_dis.parse_shooter_command() == (0, 0, False, False)
     print(f"Shooter Packet OK: {dec_shooter}")
 
     # 3. Test Conveyor Command Packet

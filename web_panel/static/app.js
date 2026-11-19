@@ -157,6 +157,7 @@ const lastSentCmd = {
   vy: 0,
   omega: 0,
   flywheel: 0,
+  shooter_mode: "auto",
   angle_run: false,
   angle_reversed: false,
   trigger: 0,
@@ -182,6 +183,7 @@ const DISTANCE_TO_RPM_TABLE = [
 
 let shooterSpeedMode = "auto"; // "auto" (Distance-based) or "manual"
 let latestTelemetryData = null;
+let latestShooterPidState = null;
 const uiAngleState = { run: false, reversed: false };
 
 // ============================================================================
@@ -563,6 +565,14 @@ function updateSensorTelemetryUI() {
 
   // 2 & 3. Measured Upper & Lower Flywheel RPM (from ESP32 / Telemetry when present)
   const telem = latestTelemetryData || {};
+  const pidState = latestShooterPidState;
+  const pidTargetRpm =
+    pidState && pidState.enabled && typeof pidState.target_rpm === "number"
+      ? pidState.target_rpm
+      : isShootingNow
+        ? setpointRpm
+        : 0;
+
   const upperRpm =
     typeof telem.upper_rpm === "number"
       ? telem.upper_rpm
@@ -576,39 +586,46 @@ function updateSensorTelemetryUI() {
         ? telem.flywheel_lower_rpm
         : null;
 
-  if (upperRpmEl && upperBadgeEl && upperSubEl) {
-    if (upperRpm !== null) {
-      const err = Math.round(upperRpm - (isShootingNow ? setpointRpm : 0));
-      upperRpmEl.textContent = `${Math.round(upperRpm)} RPM`;
-      upperBadgeEl.textContent = "LIVE PID";
-      upperBadgeEl.classList.add("badge-live");
-      upperSubEl.textContent = `Err: ${err >= 0 ? "+" : ""}${err} RPM`;
+  const updateWheelCard = (rpmEl, badgeEl, subEl, measuredRpm, pidCmd, atSpeedFlag) => {
+    if (!rpmEl || !badgeEl || !subEl) return;
+    if (measuredRpm !== null) {
+      const err = Math.round(measuredRpm - pidTargetRpm);
+      rpmEl.textContent = `${Math.round(measuredRpm)} RPM`;
+      badgeEl.textContent = atSpeedFlag ? "AT SPEED" : "LIVE PID";
+      badgeEl.classList.add("badge-live");
+      subEl.textContent =
+        pidState && pidState.enabled && typeof pidCmd === "number"
+          ? `Err: ${err >= 0 ? "+" : ""}${err} RPM | Cmd: ${pidCmd}`
+          : `Err: ${err >= 0 ? "+" : ""}${err} RPM`;
     } else {
-      upperRpmEl.textContent = "---- RPM";
-      upperBadgeEl.textContent = "Open-Loop";
-      upperBadgeEl.classList.remove("badge-live");
-      upperSubEl.textContent = isShootingNow
-        ? `FF Cmd: ${activeCmd} / 1000`
-        : "Awaiting ESP32 RPM";
+      rpmEl.textContent = "---- RPM";
+      badgeEl.textContent = "Open-Loop";
+      badgeEl.classList.remove("badge-live");
+      const cmdShown =
+        pidState && pidState.enabled && typeof pidCmd === "number" ? pidCmd : activeCmd;
+      subEl.textContent =
+        isShootingNow || (pidState && pidState.enabled)
+          ? `FF Cmd: ${cmdShown} / 1000`
+          : "Awaiting ESP32 RPM";
     }
-  }
+  };
 
-  if (lowerRpmEl && lowerBadgeEl && lowerSubEl) {
-    if (lowerRpm !== null) {
-      const err = Math.round(lowerRpm - (isShootingNow ? setpointRpm : 0));
-      lowerRpmEl.textContent = `${Math.round(lowerRpm)} RPM`;
-      lowerBadgeEl.textContent = "LIVE PID";
-      lowerBadgeEl.classList.add("badge-live");
-      lowerSubEl.textContent = `Err: ${err >= 0 ? "+" : ""}${err} RPM`;
-    } else {
-      lowerRpmEl.textContent = "---- RPM";
-      lowerBadgeEl.textContent = "Open-Loop";
-      lowerBadgeEl.classList.remove("badge-live");
-      lowerSubEl.textContent = isShootingNow
-        ? `FF Cmd: ${activeCmd} / 1000`
-        : "Awaiting ESP32 RPM";
-    }
-  }
+  updateWheelCard(
+    upperRpmEl,
+    upperBadgeEl,
+    upperSubEl,
+    upperRpm,
+    pidState ? pidState.upper_cmd : null,
+    Boolean(pidState && pidState.upper_at_speed)
+  );
+  updateWheelCard(
+    lowerRpmEl,
+    lowerBadgeEl,
+    lowerSubEl,
+    lowerRpm,
+    pidState ? pidState.lower_cmd : null,
+    Boolean(pidState && pidState.lower_at_speed)
+  );
 
   // 4. Shooter Pitch Angle & Stepper Status
   const measuredAngle =
@@ -616,6 +633,12 @@ function updateSensorTelemetryUI() {
       ? telem.shooter_angle_deg
       : typeof telem.pitch_deg === "number"
         ? telem.pitch_deg
+        : null;
+  const angleSteps =
+    typeof telem.angle_steps === "number"
+      ? Math.round(telem.angle_steps)
+      : typeof telem.shooter_steps === "number"
+        ? Math.round(telem.shooter_steps)
         : null;
 
   if (angleValEl && angleBadgeEl && angleSubEl) {
@@ -625,13 +648,18 @@ function updateSensorTelemetryUI() {
 
     if (measuredAngle !== null) {
       angleValEl.textContent = `${measuredAngle.toFixed(1)}\u00B0`;
+    } else if (angleSteps !== null) {
+      angleValEl.textContent = `${angleSteps} steps`;
     } else {
       angleValEl.textContent = angleRun ? (angleRev ? "DOWN \u2193" : "UP \u2191") : "---.-\u00B0";
     }
 
     angleBadgeEl.textContent = angleRun ? (angleRev ? "REV" : "FWD") : "IDLE";
     angleBadgeEl.classList.toggle("badge-active", angleRun);
-    angleSubEl.textContent = `Stepper: ${stepperState}`;
+    angleSubEl.textContent =
+      angleSteps !== null
+        ? `Stepper: ${stepperState} (${angleSteps} steps)`
+        : `Stepper: ${stepperState}`;
   }
 
   // 5. Distance to Target & Aim Heading
@@ -1219,7 +1247,10 @@ function controlTick() {
   document.getElementById("cmd-vx").textContent = vx;
   document.getElementById("cmd-vy").textContent = vy;
   document.getElementById("cmd-omega").textContent = omega;
-  document.getElementById("cmd-flywheel").textContent = flywheel;
+  document.getElementById("cmd-flywheel").textContent =
+    latestShooterPidState && latestShooterPidState.enabled
+      ? `${latestShooterPidState.upper_cmd} / ${latestShooterPidState.lower_cmd}`
+      : flywheel;
   document.getElementById("cmd-angle").textContent =
     angleRun ? (angleReversed ? "REV" : "FWD") : "OFF";
   document.getElementById("cmd-conveyor").textContent =
@@ -1256,20 +1287,27 @@ function controlTick() {
   }
 
   // Send shooter command when changed or active
+  const targetRpm = shootActive
+    ? Math.round(((mappingConfig.shooterSpeed || 0) / 1000) * MAX_FLYWHEEL_RPM)
+    : 0;
   if (
     flywheel !== lastSentCmd.flywheel ||
     angleRun !== lastSentCmd.angle_run ||
     angleReversed !== lastSentCmd.angle_reversed ||
+    (shootActive && shooterSpeedMode !== lastSentCmd.shooter_mode) ||
     flywheel !== 0 ||
     angleRun
   ) {
     sendWsJson({
       type: "shooter",
       flywheel,
+      mode: shooterSpeedMode,
+      target_rpm: targetRpm,
       angle_run: angleRun,
       angle_reversed: angleReversed,
     });
     lastSentCmd.flywheel = flywheel;
+    lastSentCmd.shooter_mode = shooterSpeedMode;
     lastSentCmd.angle_run = angleRun;
     lastSentCmd.angle_reversed = angleReversed;
   }
@@ -1410,8 +1448,13 @@ function updateStatusFromWs(msg) {
     document.getElementById("uart-stats-text").textContent =
       `TX: ${msg.tx_packets} | RX: ${msg.rx_packets}`;
   }
+  if (msg.shooter_pid) {
+    latestShooterPidState = msg.shooter_pid;
+  }
   if (msg.telemetry) {
     latestTelemetryData = msg.telemetry;
+    updateSensorTelemetryUI();
+  } else if (msg.shooter_pid) {
     updateSensorTelemetryUI();
   }
   if (msg.match) {
@@ -1436,8 +1479,13 @@ function initStatusPolling() {
           document.getElementById("uart-stats-text").textContent =
             `TX: ${data.stats.tx_packets} | RX: ${data.stats.rx_packets}`;
         }
+        if (data.shooter_pid) {
+          latestShooterPidState = data.shooter_pid;
+        }
         if (data.latest_telemetry) {
           latestTelemetryData = data.latest_telemetry;
+          updateSensorTelemetryUI();
+        } else if (data.shooter_pid) {
           updateSensorTelemetryUI();
         }
         if (data.match) {

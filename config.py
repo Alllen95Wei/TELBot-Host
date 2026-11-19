@@ -101,3 +101,44 @@ class SpecialGrid:
     @classmethod
     def get_coords(cls, target: str) -> tuple[float, float] | None:
         return cls.TARGET_COORDS.get(str(target).lower().strip())
+
+
+class ShooterPID:
+    """Closed-loop dual flywheel RPM PID + feedforward configuration."""
+
+    MAX_RPM = 5500.0
+    CONTROL_LOOP_HZ = 50.0
+    OUT_MIN = 0.0
+    OUT_MAX = 1000.0
+
+    # Independent upper flywheel PID + feedforward gains
+    UPPER_KP = 0.15
+    UPPER_KI = 0.08
+    UPPER_KD = 0.002
+    UPPER_KV = 1000.0 / 5500.0
+    UPPER_KS = 0.0
+
+    # Independent lower flywheel PID + feedforward gains
+    LOWER_KP = 0.15
+    LOWER_KI = 0.08
+    LOWER_KD = 0.002
+    LOWER_KV = 1000.0 / 5500.0
+    LOWER_KS = 0.0
+
+    # Anti-windup, derivative filter, and readiness tolerances
+    I_ZONE_RPM = 400.0
+    MAX_INTEGRAL = 1500.0
+    D_FILTER_ALPHA = 0.3
+    RPM_TOLERANCE = 100.0
+    DEFAULT_MANUAL_RPM = 4400.0  # Matches default UI slider (800 / 1000 * 5500)
+
+    # Distance (cm) -> Target RPM piecewise-linear lookup table
+    DISTANCE_TO_RPM_TABLE: tuple[tuple[float, float], ...] = (
+        (80.0, 2400.0),
+        (140.0, 2950.0),
+        (200.0, 3450.0),
+        (260.0, 3900.0),
+        (320.0, 4350.0),
+        (380.0, 4750.0),
+        (450.0, 5200.0),
+    )

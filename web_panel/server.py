@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import sys
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -23,6 +24,7 @@ from config import Camera as CameraConfig
 from config import ESP32 as ESP32Config
 from config import Field as FieldConfig
 from config import Server as ServerConfig
+from config import ShooterPID as ShooterPIDConfig
 from config import SpecialGrid as SpecialGridConfig
 from config import UART as UARTConfig
 from core import (
@@ -32,9 +34,11 @@ from core import (
     MatchMode,
     PartType,
     PoseEstimator,
+    ShooterSpeedController,
     UARTComm,
     VisionManager,
     VisionTarget,
+    step_shooter_control,
 )
 
 logger = logging.getLogger("TELBot.Server")
@@ -48,7 +52,15 @@ uart = UARTComm(
     timeout=UARTConfig.TIMEOUT,
 )
 pose_estimator = PoseEstimator()
-match_manager = MatchManager(on_stop_required=lambda: uart.send_stop())
+shooter_controller = ShooterSpeedController()
+
+
+def _on_match_stop_with_comm(comm_ref: UARTComm) -> None:
+    get_shooter_controller().stop()
+    comm_ref.send_stop()
+
+
+match_manager = MatchManager(on_stop_required=lambda: _on_match_stop_with_comm(get_uart_comm()))
 vision_manager = VisionManager()
 esp32_receiver = ESP32SensorReceiver(
     port=ESP32Config.PORT,
@@ -76,7 +88,7 @@ def set_uart_comm(comm: UARTComm) -> None:
     global uart
     uart = comm
     app.state.uart = comm
-    match_manager.on_stop_required = lambda: comm.send_stop()
+    match_manager.on_stop_required = lambda: _on_match_stop_with_comm(comm)
 
 
 def get_uart_comm() -> UARTComm:
@@ -132,6 +144,18 @@ def get_esp32_receiver() -> ESP32SensorReceiver:
     return getattr(app.state, "esp32_receiver", esp32_receiver)
 
 
+def set_shooter_controller(controller: ShooterSpeedController) -> None:
+    """Injects an externally managed ShooterSpeedController instance (used by main.py)."""
+    global shooter_controller
+    shooter_controller = controller
+    app.state.shooter_controller = controller
+
+
+def get_shooter_controller() -> ShooterSpeedController:
+    """Returns the active ShooterSpeedController instance."""
+    return getattr(app.state, "shooter_controller", shooter_controller)
+
+
 def _build_combined_telemetry() -> Optional[dict]:
     """
     Merges latest telemetry from Pico UART and ESP32 Sensor UART into a single
@@ -163,7 +187,10 @@ def _build_combined_telemetry() -> Optional[dict]:
             combined["dist_right_cm"] = snap_dict["dist_right_cm"]
             combined["dist_left_cm"] = snap_dict["dist_left_cm"]
 
-    return combined if combined else None
+    if combined:
+        combined["shooter_pid"] = get_shooter_controller().get_status()
+        return combined
+    return None
 
 
 # Active video streaming proxy writers to cleanly tear down on shutdown
@@ -198,7 +225,36 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"Failed to start ESP32 UART receiver: {e}")
 
+    pid_task: Optional[asyncio.Task] = None
+    if not getattr(app.state, "control_loop_managed", False):
+        async def _standalone_shooter_pid_loop() -> None:
+            tick_interval = 1.0 / max(1.0, float(ShooterPIDConfig.CONTROL_LOOP_HZ))
+            last_sent_flywheel = (0, 0)
+            while True:
+                loop_start = time.monotonic()
+                last_sent_flywheel = step_shooter_control(
+                    controller=get_shooter_controller(),
+                    uart=get_uart_comm(),
+                    match_manager=get_match_manager(),
+                    pose_estimator=get_pose_estimator(),
+                    vision_manager=get_vision_manager(),
+                    esp32_receiver=get_esp32_receiver(),
+                    last_sent_flywheel=last_sent_flywheel,
+                    now=loop_start,
+                )
+                elapsed = time.monotonic() - loop_start
+                await asyncio.sleep(max(0.001, tick_interval - elapsed))
+
+        pid_task = asyncio.create_task(
+            _standalone_shooter_pid_loop(), name="Standalone-Shooter-PID-Loop"
+        )
+
     yield
+
+    if pid_task is not None:
+        pid_task.cancel()
+        await asyncio.gather(pid_task, return_exceptions=True)
+        get_shooter_controller().stop()
 
     # Terminate any active uStreamer proxy connections on server shutdown
     for w in list(_active_stream_writers):
@@ -286,12 +342,44 @@ class DriveRequest(BaseModel):
 
 class ShooterRequest(BaseModel):
     flywheel: int = Field(default=0, ge=-1000, le=1000, description="Flywheel speed (-1000 to +1000)")
+    upper_flywheel: Optional[int] = Field(
+        default=None, ge=-1000, le=1000, description="Independent upper flywheel speed (-1000 to +1000)"
+    )
+    lower_flywheel: Optional[int] = Field(
+        default=None, ge=-1000, le=1000, description="Independent lower flywheel speed (-1000 to +1000)"
+    )
+    target_rpm: Optional[float] = Field(
+        default=None, ge=0.0, le=ShooterPIDConfig.MAX_RPM, description="Shared target RPM (0 to MAX_RPM)"
+    )
+    mode: Optional[str] = Field(default=None, description="Speed control mode: 'auto' or 'manual'")
     angle_run: bool = Field(default=False, description="Whether pitch angle stepper is running")
     angle_reversed: bool = Field(default=False, description="Whether pitch angle direction is reversed")
 
 
 class ShooterFlywheelRequest(BaseModel):
     speed: int = Field(default=0, ge=-1000, le=1000, description="Flywheel speed only (-1000 to +1000)")
+    lower_speed: Optional[int] = Field(
+        default=None, ge=-1000, le=1000, description="Optional independent lower flywheel speed (-1000 to +1000)"
+    )
+    target_rpm: Optional[float] = Field(
+        default=None, ge=0.0, le=ShooterPIDConfig.MAX_RPM, description="Shared target RPM (0 to MAX_RPM)"
+    )
+    mode: Optional[str] = Field(default=None, description="Speed control mode: 'auto' or 'manual'")
+
+
+class ShooterPIDUpdateRequest(BaseModel):
+    mode: Optional[str] = Field(default=None, description="Speed mode: 'auto' or 'manual'")
+    target_rpm: Optional[float] = Field(
+        default=None, ge=0.0, le=ShooterPIDConfig.MAX_RPM, description="Manual / fallback target RPM"
+    )
+    enabled: Optional[bool] = Field(default=None, description="Enable or disable closed-loop shooter PID")
+    wheel: str = Field(default="both", description="Target PID wheel for gain updates: 'upper', 'lower', or 'both'")
+    kp: Optional[float] = Field(default=None, ge=0.0)
+    ki: Optional[float] = Field(default=None, ge=0.0)
+    kd: Optional[float] = Field(default=None, ge=0.0)
+    kv: Optional[float] = Field(default=None, ge=0.0)
+    ks: Optional[float] = Field(default=None, ge=0.0)
+    reset: bool = Field(default=False, description="Reset PID integral and derivative history")
 
 
 class ShooterAngleRequest(BaseModel):
@@ -398,6 +486,7 @@ def get_status():
         "vision": vision_mgr.get_status(),
         "latest_telemetry": parsed_telem,
         "pose": latest_pose.to_dict() if latest_pose is not None else None,
+        "shooter_pid": get_shooter_controller().get_status(),
     }
 
 
@@ -582,31 +671,121 @@ def drive_robot(req: DriveRequest):
 @app.post("/api/shooter")
 def control_shooter(req: ShooterRequest):
     """
-    Controls shooter flywheels and pitch angle stepper state (run, reversed).
+    Controls shooter flywheels (via closed-loop PID or explicit split commands)
+    and pitch angle stepper state (run, reversed).
     """
     comm = _require_teleop_allowed()
-    comm.send_shooter_command(
-        flywheel=req.flywheel,
-        angle_run=req.angle_run,
-        angle_reversed=req.angle_reversed,
+    ctrl = get_shooter_controller()
+    if req.upper_flywheel is not None or req.lower_flywheel is not None:
+        upper = req.flywheel if req.upper_flywheel is None else req.upper_flywheel
+        lower = upper if req.lower_flywheel is None else req.lower_flywheel
+        ctrl.stop()
+        comm.send_shooter_command(
+            upper_flywheel=upper,
+            lower_flywheel=lower,
+            angle_run=req.angle_run,
+            angle_reversed=req.angle_reversed,
+        )
+        return {
+            "status": "enqueued",
+            "subsystem": "shooter",
+            "flywheel": upper,
+            "upper_flywheel": upper,
+            "lower_flywheel": lower,
+            "angle_run": req.angle_run,
+            "angle_reversed": req.angle_reversed,
+        }
+
+    ctrl.set_operator_command(
+        flywheel_cmd=req.flywheel,
+        mode=req.mode,
+        target_rpm=req.target_rpm,
     )
+    comm.send_shooter_angle(run=req.angle_run, reversed=req.angle_reversed)
     return {
         "status": "enqueued",
         "subsystem": "shooter",
         "flywheel": req.flywheel,
         "angle_run": req.angle_run,
         "angle_reversed": req.angle_reversed,
+        "shooter_pid": ctrl.get_status(),
     }
 
 
 @app.post("/api/shooter/flywheel")
 def control_shooter_flywheel(req: ShooterFlywheelRequest):
     """
-    Sets only the shooter flywheel speed.
+    Sets shooter flywheel speed via closed-loop PID (or direct split lower_speed override).
     """
     comm = _require_teleop_allowed()
-    comm.send_shooter_flywheel(speed=req.speed)
-    return {"status": "enqueued", "subsystem": "shooter", "flywheel": req.speed}
+    ctrl = get_shooter_controller()
+    if req.lower_speed is not None:
+        ctrl.stop()
+        comm.send_shooter_flywheel(speed=req.speed, lower_speed=req.lower_speed)
+        return {
+            "status": "enqueued",
+            "subsystem": "shooter",
+            "flywheel": req.speed,
+            "lower_flywheel": req.lower_speed,
+        }
+
+    ctrl.set_operator_command(
+        flywheel_cmd=req.speed,
+        mode=req.mode,
+        target_rpm=req.target_rpm,
+    )
+    return {
+        "status": "enqueued",
+        "subsystem": "shooter",
+        "flywheel": req.speed,
+        "shooter_pid": ctrl.get_status(),
+    }
+
+
+@app.get("/api/shooter/pid")
+def get_shooter_pid():
+    """Returns current dual flywheel PID controller status and configured gains."""
+    ctrl = get_shooter_controller()
+    return {
+        "status": "ok",
+        "state": ctrl.get_status(),
+        "gains": ctrl.get_gains(),
+    }
+
+
+@app.post("/api/shooter/pid")
+def update_shooter_pid(req: ShooterPIDUpdateRequest):
+    """Updates flywheel PID mode, target RPM, enable state, or runtime gains."""
+    ctrl = get_shooter_controller()
+    try:
+        if req.mode is not None:
+            ctrl.set_mode(req.mode)
+        if req.target_rpm is not None:
+            ctrl.set_manual_rpm(
+                req.target_rpm,
+                switch_to_manual=(req.mode != "auto" if req.mode is not None else True),
+            )
+        if any(g is not None for g in (req.kp, req.ki, req.kd, req.kv, req.ks)):
+            ctrl.set_gains(
+                wheel=req.wheel,
+                kp=req.kp,
+                ki=req.ki,
+                kd=req.kd,
+                kv=req.kv,
+                ks=req.ks,
+            )
+        if req.enabled is not None:
+            ctrl.set_enabled(req.enabled)
+        if req.reset:
+            ctrl.reset()
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {
+        "status": "ok",
+        "state": ctrl.get_status(),
+        "gains": ctrl.get_gains(),
+    }
 
 
 @app.post("/api/shooter/angle")
@@ -689,8 +868,11 @@ def stop_robot(req: StopRequest):
     Appends an emergency or normal STOP command into the TX PriorityQueue (Priority 0).
     Purges any stale drive commands to halt motors instantly.
     """
+    part = PartType(req.part)
+    if part in (PartType.ALL, PartType.SHOOTER):
+        get_shooter_controller().stop()
     comm = get_uart_comm()
-    comm.send_stop(part=PartType(req.part), clear_pending_drive=req.clear_pending_drive)
+    comm.send_stop(part=part, clear_pending_drive=req.clear_pending_drive)
     return {"status": "stopped", "part": req.part, "estop_active": comm.estop_active}
 
 
@@ -881,6 +1063,7 @@ async def websocket_control(websocket: WebSocket):
     await websocket.accept()
     logger.info("WebHID/Gamepad WebSocket client connected.")
     comm = get_uart_comm()
+    last_angle_state = (False, False)
 
     try:
         while True:
@@ -899,16 +1082,25 @@ async def websocket_control(websocket: WebSocket):
                 accepted = comm.send_drive(vx=vx, vy=vy, omega=omega)
 
             elif msg_type == "shooter":
-                flywheel = int(data.get("flywheel", 0))
-                angle_run = bool(data.get("angle_run", False))
-                angle_reversed = bool(data.get("angle_reversed", False))
-                accepted = comm.send_shooter_command(
-                    flywheel=flywheel,
-                    angle_run=angle_run,
-                    angle_reversed=angle_reversed,
-                )
+                if comm.estop_active:
+                    accepted = False
+                    get_shooter_controller().stop()
+                else:
+                    angle_run = bool(data.get("angle_run", False))
+                    angle_reversed = bool(data.get("angle_reversed", False))
+                    get_shooter_controller().set_operator_command(
+                        flywheel_cmd=int(data.get("flywheel", 0)),
+                        mode=data.get("mode"),
+                        target_rpm=data.get("target_rpm"),
+                    )
+                    angle_state = (angle_run, angle_reversed)
+                    if angle_state != last_angle_state or angle_run:
+                        comm.send_shooter_angle(run=angle_run, reversed=angle_reversed)
+                        last_angle_state = angle_state
+                    accepted = True
 
             elif msg_type == "shooter_disable_angle":
+                last_angle_state = (False, False)
                 accepted = comm.send_shooter_disable_angle()
 
             elif msg_type == "conveyor":
@@ -923,7 +1115,10 @@ async def websocket_control(websocket: WebSocket):
 
             elif msg_type == "stop":
                 part_val = int(data.get("part", PartType.ALL.value))
-                comm.send_stop(part=PartType(part_val))
+                part = PartType(part_val)
+                if part in (PartType.ALL, PartType.SHOOTER):
+                    get_shooter_controller().stop()
+                comm.send_stop(part=part)
 
             elif msg_type == "vision":
                 active_target = str(data.get("active_target", "none"))
@@ -953,11 +1148,14 @@ async def websocket_control(websocket: WebSocket):
                 "vision": get_vision_manager().get_status(),
                 "telemetry": parsed_telem,
                 "pose": latest_pose.to_dict() if latest_pose is not None else None,
+                "shooter_pid": get_shooter_controller().get_status(),
             })
 
     except WebSocketDisconnect:
         logger.info("WebSocket client disconnected. Issuing safety stop...")
+        get_shooter_controller().stop()
         comm.send_stop()
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
+        get_shooter_controller().stop()
         comm.send_stop()

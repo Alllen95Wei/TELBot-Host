@@ -17,6 +17,7 @@ from config import ESP32 as ESP32Config
 from config import EStop as EStopConfig
 from config import Safety as SafetyConfig
 from config import Server as ServerConfig
+from config import ShooterPID as ShooterPIDConfig
 from config import UART as UARTConfig
 from core import (
     CmdType,
@@ -26,14 +27,17 @@ from core import (
     Packet,
     PartType,
     PoseEstimator,
+    ShooterSpeedController,
     UARTComm,
     VisionManager,
+    step_shooter_control,
 )
 from web_panel.server import (
     app,
     set_esp32_receiver,
     set_match_manager,
     set_pose_estimator,
+    set_shooter_controller,
     set_uart_comm,
     set_vision_manager,
 )
@@ -243,7 +247,8 @@ class RobotHost:
         self.latest_sensor_state: dict = {}
         self.last_ack_time: float = 0.0
         self.pose_estimator = PoseEstimator()
-        self.match_manager = MatchManager(on_stop_required=lambda: self.uart.send_stop())
+        self.shooter_controller = ShooterSpeedController()
+        self.match_manager = MatchManager(on_stop_required=self._handle_match_stop)
         self.vision_manager = VisionManager()
 
         self.estop = EStopMonitor(
@@ -263,8 +268,14 @@ class RobotHost:
     # --------------------------------------------------------------------------
     # Hardware Callbacks (Thread-safe)
     # --------------------------------------------------------------------------
+    def _handle_match_stop(self) -> None:
+        """Stops closed-loop flywheel controller and halts all slave actuators."""
+        self.shooter_controller.stop()
+        self.uart.send_stop()
+
     def _handle_estop_press(self) -> None:
         """Called directly from the GPIO interrupt thread when E-Stop engages."""
+        self.shooter_controller.stop()
         self.uart.trigger_estop()
 
     def _handle_estop_release(self) -> None:
@@ -338,17 +349,20 @@ class RobotHost:
             )
 
     # --------------------------------------------------------------------------
-    # Async Safety & Heartbeat Task
+    # Async Safety & Heartbeat Task (50 Hz)
     # --------------------------------------------------------------------------
     async def _safety_and_heartbeat_loop(self) -> None:
         """
-        1. Transmits a PING packet every 200 ms to satisfy the Pico's 400 ms watchdog.
-        2. Auto-zeros chassis velocity if no drive update arrives within DRIVE_TIMEOUT.
+        1. Runs the 50 Hz dual-flywheel RPM PID control loop with phase/E-Stop gating.
+        2. Transmits a PING packet every 200 ms to satisfy the Pico's 400 ms watchdog.
+        3. Auto-zeros chassis velocity if no drive update arrives within DRIVE_TIMEOUT.
         """
         last_ping = 0.0
-        tick_interval = 0.05  # 50 ms resolution
+        last_sent_flywheel = (0, 0)
+        tick_interval = 1.0 / max(1.0, float(ShooterPIDConfig.CONTROL_LOOP_HZ))
 
         while not self._restart_requested:
+            loop_start = time.monotonic()
             if self._uvicorn_server is not None and self._uvicorn_server.should_exit:
                 # Force close lingering long-lived streaming connections (e.g. MJPEG proxy, WebSockets)
                 # so Uvicorn does not hang waiting for connections to close on Python 3.12+ wait_closed().
@@ -383,7 +397,20 @@ class RobotHost:
                 )
                 self.uart.send_drive(0, 0, 0)
 
-            await asyncio.sleep(tick_interval)
+            # 4. 50 Hz dual flywheel PID tick
+            last_sent_flywheel = step_shooter_control(
+                controller=self.shooter_controller,
+                uart=self.uart,
+                match_manager=self.match_manager,
+                pose_estimator=self.pose_estimator,
+                vision_manager=self.vision_manager,
+                esp32_receiver=self.esp32,
+                last_sent_flywheel=last_sent_flywheel,
+                now=now,
+            )
+
+            elapsed = time.monotonic() - loop_start
+            await asyncio.sleep(max(0.001, tick_interval - elapsed))
 
     # --------------------------------------------------------------------------
     # Main Runtime Lifecycle
@@ -424,13 +451,15 @@ class RobotHost:
             set_uart_comm(self.uart)
             set_esp32_receiver(self.esp32)
             set_pose_estimator(self.pose_estimator)
+            set_shooter_controller(self.shooter_controller)
             set_match_manager(self.match_manager)
             set_vision_manager(self.vision_manager)
+            app.state.control_loop_managed = True
 
             # 2. Start physical E-Stop interrupt listener
             self.estop.start()
 
-            # 3. Run safety/PING loop alongside Uvicorn
+            # 3. Run safety/PING/PID loop alongside Uvicorn
             safety_task = asyncio.create_task(
                 self._safety_and_heartbeat_loop(), name="Host-Safety-Loop"
             )
@@ -448,6 +477,9 @@ class RobotHost:
             if safety_task is not None:
                 safety_task.cancel()
                 await asyncio.gather(safety_task, return_exceptions=True)
+
+            # Reset flywheel PID controller before releasing GPIO / stopping UART
+            self.shooter_controller.stop()
 
             # Release GPIO line before stopping UART or restarting process
             self.estop.stop()
