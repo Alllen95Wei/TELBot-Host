@@ -5,7 +5,7 @@ class UART:
 
 
 class ESP32:
-    PORT = "/dev/ttyAMA1"
+    PORT = "/dev/ttyAMA2"
     BAUD_RATE = 115200
     TIMEOUT = 0.05  # seconds (responsive for 50 Hz RX thread polling)
     STALE_TIMEOUT_S = 0.5  # seconds before ESP32 sensor snapshot is marked stale
