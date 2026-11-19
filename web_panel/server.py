@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -28,6 +28,7 @@ from config import ShooterPID as ShooterPIDConfig
 from config import SpecialGrid as SpecialGridConfig
 from config import UART as UARTConfig
 from core import (
+    AutoRoutineRunner,
     ChassisPoseController,
     ConveyorController,
     ESP32SensorReceiver,
@@ -36,10 +37,12 @@ from core import (
     MatchMode,
     PartType,
     PoseEstimator,
+    RoutineStore,
     ShooterSpeedController,
     UARTComm,
     VisionManager,
     VisionTarget,
+    step_auto_routine,
     step_chassis_control,
     step_conveyor_control,
     step_shooter_control,
@@ -59,9 +62,12 @@ pose_estimator = PoseEstimator()
 shooter_controller = ShooterSpeedController()
 conveyor_controller = ConveyorController()
 chassis_controller = ChassisPoseController()
+routine_store = RoutineStore()
+auto_runner = AutoRoutineRunner(routine_store)
 
 
 def _on_match_stop_with_comm(comm_ref: UARTComm) -> None:
+    get_auto_runner().abort("Match stopped")
     get_shooter_controller().stop()
     get_conveyor_controller().stop()
     get_chassis_controller().stop()
@@ -188,6 +194,30 @@ def get_chassis_controller() -> ChassisPoseController:
     return getattr(app.state, "chassis_controller", chassis_controller)
 
 
+def set_routine_store(store: RoutineStore) -> None:
+    """Injects an externally managed RoutineStore instance (used by main.py)."""
+    global routine_store
+    routine_store = store
+    app.state.routine_store = store
+
+
+def get_routine_store() -> RoutineStore:
+    """Returns the active RoutineStore instance."""
+    return getattr(app.state, "routine_store", routine_store)
+
+
+def set_auto_runner(runner: AutoRoutineRunner) -> None:
+    """Injects an externally managed AutoRoutineRunner instance (used by main.py)."""
+    global auto_runner
+    auto_runner = runner
+    app.state.auto_runner = runner
+
+
+def get_auto_runner() -> AutoRoutineRunner:
+    """Returns the active AutoRoutineRunner instance."""
+    return getattr(app.state, "auto_runner", auto_runner)
+
+
 def _build_combined_telemetry() -> Optional[dict]:
     """
     Merges latest telemetry from Pico UART and ESP32 Sensor UART into a single
@@ -224,6 +254,7 @@ def _build_combined_telemetry() -> Optional[dict]:
         combined["shooter_pid"] = get_shooter_controller().get_status()
         combined["conveyor"] = get_conveyor_controller().get_status()
         combined["chassis_pid"] = get_chassis_controller().get_status()
+        combined["auto_routine"] = get_auto_runner().get_status()
         return combined
     return None
 
@@ -274,18 +305,33 @@ async def lifespan(app: FastAPI):
                 esp32_ref = get_esp32_receiver()
                 pose_ref = get_pose_estimator()
                 shooter_ref = get_shooter_controller()
+                conveyor_ref = get_conveyor_controller()
+                chassis_ref = get_chassis_controller()
+                vision_ref = get_vision_manager()
+                step_auto_routine(
+                    runner=get_auto_runner(),
+                    uart=comm_ref,
+                    match_manager=match_ref,
+                    pose_estimator=pose_ref,
+                    vision_manager=vision_ref,
+                    esp32_receiver=esp32_ref,
+                    chassis_controller=chassis_ref,
+                    shooter_controller=shooter_ref,
+                    conveyor_controller=conveyor_ref,
+                    now=loop_start,
+                )
                 last_sent_flywheel = step_shooter_control(
                     controller=shooter_ref,
                     uart=comm_ref,
                     match_manager=match_ref,
                     pose_estimator=pose_ref,
-                    vision_manager=get_vision_manager(),
+                    vision_manager=vision_ref,
                     esp32_receiver=esp32_ref,
                     last_sent_flywheel=last_sent_flywheel,
                     now=loop_start,
                 )
                 last_sent_spinner = step_conveyor_control(
-                    conveyor_controller=get_conveyor_controller(),
+                    conveyor_controller=conveyor_ref,
                     shooter_controller=shooter_ref,
                     uart=comm_ref,
                     match_manager=match_ref,
@@ -294,7 +340,7 @@ async def lifespan(app: FastAPI):
                     now=loop_start,
                 )
                 last_sent_drive = step_chassis_control(
-                    controller=get_chassis_controller(),
+                    controller=chassis_ref,
                     uart=comm_ref,
                     match_manager=match_ref,
                     pose_estimator=pose_ref,
@@ -313,6 +359,7 @@ async def lifespan(app: FastAPI):
     if pid_task is not None:
         pid_task.cancel()
         await asyncio.gather(pid_task, return_exceptions=True)
+        get_auto_runner().abort("Standalone server shutdown")
         get_shooter_controller().stop()
         get_conveyor_controller().stop()
         get_chassis_controller().stop()
@@ -362,6 +409,15 @@ def serve_web_panel():
     if not index_file.is_file():
         raise HTTPException(status_code=404, detail="web_panel/index.html not found")
     return FileResponse(path=str(index_file), media_type="text/html")
+
+
+@app.get("/auto", include_in_schema=False)
+def serve_auto_editor():
+    """Serves the dedicated Autonomous Routine Editor page."""
+    editor_file = PANEL_DIR / "auto_editor.html"
+    if not editor_file.is_file():
+        raise HTTPException(status_code=404, detail="web_panel/auto_editor.html not found")
+    return FileResponse(path=str(editor_file), media_type="text/html")
 
 
 def _require_ready_uart() -> UARTComm:
@@ -592,6 +648,16 @@ class VisionTargetRequest(BaseModel):
     force: bool = Field(default=False, description="Force override an already latched target")
 
 
+class AutoActiveRequest(BaseModel):
+    routine_id: str = Field(..., description="Routine ID to activate for Autonomous phase")
+
+
+class AutoRunRequest(BaseModel):
+    routine_id: Optional[str] = Field(
+        default=None, description="Optional routine ID to execute (defaults to active routine)"
+    )
+
+
 # ==============================================================================
 # REST API Endpoints
 # ==============================================================================
@@ -619,6 +685,7 @@ def get_status():
         "shooter_pid": get_shooter_controller().get_status(),
         "conveyor": get_conveyor_controller().get_status(),
         "chassis_pid": get_chassis_controller().get_status(),
+        "auto_routine": get_auto_runner().get_status(),
     }
 
 
@@ -633,9 +700,14 @@ def get_match_status():
 
 @app.post("/api/match/auto/start")
 def start_auto_phase():
-    """Starts the 1:00 Autonomous phase (locks controller input) and unlatches vision target."""
+    """Starts the 1:00 Autonomous phase (locks controller input), resets vision, and starts active auto routine."""
     get_vision_manager().reset()
-    return get_match_manager().start_auto()
+    get_chassis_controller().stop()
+    get_shooter_controller().stop()
+    get_conveyor_controller().stop()
+    match_status = get_match_manager().start_auto()
+    auto_state = get_auto_runner().start()
+    return {**match_status, "auto_routine": auto_state}
 
 
 @app.post("/api/match/teleop/enable")
@@ -798,20 +870,161 @@ def calibrate_pose(req: PoseCalibrateRequest):
     }
 
 
+@app.get("/api/auto/routines")
+def list_auto_routines():
+    """Lists all saved autonomous routines, the active routine ID, and live runner status."""
+    store = get_routine_store()
+    return {
+        "status": "ok",
+        "active_routine_id": store.active_routine_id,
+        "routines": store.list_routines(),
+        "runner": get_auto_runner().get_status(),
+    }
+
+
+@app.get("/api/auto/routines/{routine_id}")
+def get_auto_routine(routine_id: str):
+    """Fetches a single autonomous routine JSON definition by ID."""
+    store = get_routine_store()
+    try:
+        routine = store.get_routine(routine_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {
+        "status": "ok",
+        "routine": routine.to_dict(),
+        "is_active": (routine.id == store.active_routine_id),
+    }
+
+
+@app.post("/api/auto/routines")
+def save_auto_routine(payload: dict = Body(...)):
+    """Creates or updates a structured autonomous routine JSON definition."""
+    store = get_routine_store()
+    try:
+        saved = store.save_routine(payload)
+        if bool(payload.get("set_active")):
+            store.set_active_routine(saved.id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {
+        "status": "saved",
+        "routine": saved.to_dict(),
+        "active_routine_id": store.active_routine_id,
+        "routines": store.list_routines(),
+    }
+
+
+@app.delete("/api/auto/routines/{routine_id}")
+def delete_auto_routine(routine_id: str):
+    """Deletes a saved autonomous routine unless it is the last one or currently running."""
+    runner = get_auto_runner()
+    if runner.is_running and runner.state.routine_id == routine_id:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot delete routine '{routine_id}' while it is running",
+        )
+    store = get_routine_store()
+    try:
+        store.delete_routine(routine_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {
+        "status": "deleted",
+        "active_routine_id": store.active_routine_id,
+        "routines": store.list_routines(),
+    }
+
+
+@app.post("/api/auto/active")
+def set_active_auto_routine(req: AutoActiveRequest):
+    """Selects which routine runs during the 1:00 Autonomous phase."""
+    store = get_routine_store()
+    try:
+        active = store.set_active_routine(req.routine_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {
+        "status": "ok",
+        "active_routine_id": store.active_routine_id,
+        "routine": active.to_dict(),
+    }
+
+
+@app.post("/api/auto/run")
+def run_auto_routine(req: Optional[AutoRunRequest] = Body(default=None)):
+    """Starts running an autonomous routine (permitted in PRACTICE or AUTO mode)."""
+    _require_ready_uart()
+    mode = get_match_manager().mode
+    if mode not in (MatchMode.PRACTICE, MatchMode.AUTO):
+        raise HTTPException(
+            status_code=423,
+            detail=(
+                "Autonomous routine run rejected: only permitted in PRACTICE or AUTO mode "
+                f"(current mode: {mode.value})"
+            ),
+        )
+
+    store = get_routine_store()
+    routine = None
+    if req is not None and req.routine_id:
+        try:
+            routine = store.get_routine(req.routine_id)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+    get_chassis_controller().stop()
+    get_shooter_controller().stop()
+    get_conveyor_controller().stop()
+    state = get_auto_runner().start(routine=routine)
+    return {"status": "started", "auto_routine": state}
+
+
+@app.post("/api/auto/abort")
+def abort_auto_routine():
+    """Aborts any running autonomous routine and stops all controlled subsystems."""
+    comm = get_uart_comm()
+    state = get_auto_runner().abort(
+        reason="Aborted by operator",
+        uart=comm,
+        chassis_controller=get_chassis_controller(),
+        shooter_controller=get_shooter_controller(),
+        conveyor_controller=get_conveyor_controller(),
+    )
+    return {"status": "aborted", "auto_routine": state}
+
+
 @app.post("/api/drive")
 def drive_robot(req: DriveRequest):
     """
     Appends a new chassis drive command into the TX PriorityQueue (Priority 2).
-    Any non-zero manual drive command immediately cancels active Chassis P2P PID.
+    Any non-zero manual drive command immediately cancels active auto routine and Chassis P2P PID.
     """
     comm = _require_teleop_allowed()
     chassis_ctrl = get_chassis_controller()
+    runner = get_auto_runner()
     if req.vx != 0 or req.vy != 0 or req.omega != 0:
+        if runner.is_running:
+            runner.abort(
+                reason="Preempted by manual driver input",
+                uart=comm,
+                chassis_controller=chassis_ctrl,
+                shooter_controller=get_shooter_controller(),
+                conveyor_controller=get_conveyor_controller(),
+            )
         chassis_ctrl.stop()
         comm.send_drive(vx=req.vx, vy=req.vy, omega=req.omega)
         return {"status": "enqueued", "subsystem": "chassis", "vx": req.vx, "vy": req.vy, "omega": req.omega}
 
-    if chassis_ctrl.enabled:
+    if runner.is_running or chassis_ctrl.enabled:
         return {
             "status": "ignored_p2p_active",
             "subsystem": "chassis",
@@ -819,6 +1032,7 @@ def drive_robot(req: DriveRequest):
             "vy": 0,
             "omega": 0,
             "chassis_pid": chassis_ctrl.get_status(),
+            "auto_routine": runner.get_status(),
         }
 
     comm.send_drive(vx=0, vy=0, omega=0)
@@ -1202,6 +1416,8 @@ def stop_robot(req: StopRequest):
     Purges any stale drive commands to halt motors instantly.
     """
     part = PartType(req.part)
+    if part == PartType.ALL:
+        get_auto_runner().abort("Emergency / Stop All command")
     if part in (PartType.ALL, PartType.CHASSIS):
         get_chassis_controller().stop()
     if part in (PartType.ALL, PartType.SHOOTER):
@@ -1417,11 +1633,20 @@ async def websocket_control(websocket: WebSocket):
                 vy = int(data.get("vy", 0))
                 omega = int(data.get("omega", 0))
                 chassis_ctrl = get_chassis_controller()
+                runner = get_auto_runner()
                 if vx != 0 or vy != 0 or omega != 0:
+                    if runner.is_running:
+                        runner.abort(
+                            reason="Preempted by manual driver input",
+                            uart=comm,
+                            chassis_controller=chassis_ctrl,
+                            shooter_controller=get_shooter_controller(),
+                            conveyor_controller=get_conveyor_controller(),
+                        )
                     chassis_ctrl.stop()
                     accepted = comm.send_drive(vx=vx, vy=vy, omega=omega)
-                elif chassis_ctrl.enabled:
-                    # Ignore idle centered-stick keep-alives while closed-loop P2P is driving
+                elif runner.is_running or chassis_ctrl.enabled:
+                    # Ignore idle centered-stick keep-alives while auto routine or P2P is driving
                     accepted = True
                 else:
                     accepted = comm.send_drive(vx=0, vy=0, omega=0)
@@ -1430,6 +1655,12 @@ async def websocket_control(websocket: WebSocket):
                 if comm.estop_active:
                     accepted = False
                     get_shooter_controller().stop()
+                elif (
+                    get_auto_runner().is_running
+                    and int(data.get("flywheel", 0)) == 0
+                    and not bool(data.get("angle_run", False))
+                ):
+                    accepted = True
                 else:
                     angle_run = bool(data.get("angle_run", False))
                     angle_reversed = bool(data.get("angle_reversed", False))
@@ -1449,23 +1680,32 @@ async def websocket_control(websocket: WebSocket):
                 accepted = comm.send_shooter_disable_angle()
 
             elif msg_type == "conveyor":
-                trigger = int(data.get("trigger", 0))
-                spinner_run = bool(data.get("spinner_run", False))
-                spinner_reversed = bool(data.get("spinner_reversed", False))
-                eff_trig, eff_run, eff_rev = get_conveyor_controller().set_operator_command(
-                    trigger=trigger,
-                    spinner_run=spinner_run,
-                    spinner_reversed=spinner_reversed,
-                )
-                accepted = comm.send_conveyor_command(
-                    trigger=eff_trig,
-                    spinner_run=eff_run,
-                    spinner_reversed=eff_rev,
-                )
+                if (
+                    get_auto_runner().is_running
+                    and int(data.get("trigger", 0)) == 0
+                    and not bool(data.get("spinner_run", False))
+                ):
+                    accepted = True
+                else:
+                    trigger = int(data.get("trigger", 0))
+                    spinner_run = bool(data.get("spinner_run", False))
+                    spinner_reversed = bool(data.get("spinner_reversed", False))
+                    eff_trig, eff_run, eff_rev = get_conveyor_controller().set_operator_command(
+                        trigger=trigger,
+                        spinner_run=spinner_run,
+                        spinner_reversed=spinner_reversed,
+                    )
+                    accepted = comm.send_conveyor_command(
+                        trigger=eff_trig,
+                        spinner_run=eff_run,
+                        spinner_reversed=eff_rev,
+                    )
 
             elif msg_type == "stop":
                 part_val = int(data.get("part", PartType.ALL.value))
                 part = PartType(part_val)
+                if part == PartType.ALL:
+                    get_auto_runner().abort("WebSocket STOP ALL")
                 if part in (PartType.ALL, PartType.CHASSIS):
                     get_chassis_controller().stop()
                 if part in (PartType.ALL, PartType.SHOOTER):
@@ -1505,17 +1745,24 @@ async def websocket_control(websocket: WebSocket):
                 "shooter_pid": get_shooter_controller().get_status(),
                 "conveyor": get_conveyor_controller().get_status(),
                 "chassis_pid": get_chassis_controller().get_status(),
+                "auto_routine": get_auto_runner().get_status(),
             })
 
     except WebSocketDisconnect:
-        logger.info("WebSocket client disconnected. Issuing safety stop...")
-        get_chassis_controller().stop()
-        get_shooter_controller().stop()
-        get_conveyor_controller().stop()
-        comm.send_stop()
+        if get_match_manager().mode == MatchMode.AUTO:
+            logger.info("WebSocket client disconnected during AUTO; leaving autonomous routine active.")
+        else:
+            logger.info("WebSocket client disconnected. Issuing safety stop...")
+            get_auto_runner().abort("WebSocket disconnected")
+            get_chassis_controller().stop()
+            get_shooter_controller().stop()
+            get_conveyor_controller().stop()
+            comm.send_stop()
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
-        get_chassis_controller().stop()
-        get_shooter_controller().stop()
-        get_conveyor_controller().stop()
-        comm.send_stop()
+        if get_match_manager().mode != MatchMode.AUTO:
+            get_auto_runner().abort(f"WebSocket error: {e}")
+            get_chassis_controller().stop()
+            get_shooter_controller().stop()
+            get_conveyor_controller().stop()
+            comm.send_stop()

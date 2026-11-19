@@ -1,0 +1,51 @@
+{
+  "id": "default_1x3_auto",
+  "name": "1x3 Active Goal (2 Balls) + Center Follow-up",
+  "description": "Waits up to 2.0s for laptop YOLO 1x3 latch, drives to midfield while pre-spinning flywheels in Auto-Distance mode, feeds 2 balls, and safe-stops.",
+  "start_pose": {
+    "x_cm": 200.0,
+    "y_cm": 80.0,
+    "heading_deg": 0.0
+  },
+  "updated_at": 1795118612.2704494,
+  "steps": [
+    {
+      "id": "step_1",
+      "type": "wait_vision",
+      "label": "Wait for YOLO 1x3 Latch",
+      "timeout_s": 2.0,
+      "fallback_target": "center"
+    },
+    {
+      "id": "step_2",
+      "type": "drive_to",
+      "label": "Drive to Midfield Shooting Spot",
+      "x_cm": 200.0,
+      "y_cm": 260.0,
+      "aim_mode": "active_1x3",
+      "heading_deg": 0.0,
+      "goal_column": "center",
+      "stop_on_arrival": true,
+      "pre_spin_shooter": true,
+      "shooter_mode": "auto",
+      "shooter_rpm": 3900.0,
+      "timeout_s": 5.0
+    },
+    {
+      "id": "step_3",
+      "type": "feed_balls",
+      "label": "Shoot 2 Balls into Active 1x3",
+      "trigger_speed": 700,
+      "spinner_run": true,
+      "require_at_speed": true,
+      "at_speed_timeout_s": 1.5,
+      "ball_count": 2,
+      "duration_s": 2.5
+    },
+    {
+      "id": "step_4",
+      "type": "stop_all",
+      "label": "Safe Stop"
+    }
+  ]
+}

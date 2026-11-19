@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TELBot Autonomous Routine Editor</title>
+  <link rel="stylesheet" href="/static/beer.min.css" />
+  <link rel="stylesheet" href="/static/style.css" />
+  <script type="module" src="/static/beer.min.js"></script>
+  <script defer src="/static/auto_editor.js"></script>
+</head>
+<body class="dark">
+  <main class="responsive max dashboard-main">
+    <!-- Top Bar -->
+    <article class="round border topbar-card">
+      <div class="row wrap space-between middle-align" style="gap: 8px;">
+        <div class="row middle-align" style="gap: 8px;">
+          <i class="primary-text">route</i>
+          <div>
+            <h6 class="no-margin bold">Autonomous Routine Editor</h6>
+            <small class="mono" id="editor-status-subtitle">Host JSON Routines &amp; Interactive Field Path Planner</small>
+          </div>
+        </div>
+
+        <div class="row wrap middle-align" style="gap: 6px;">
+          <span class="match-mode-chip match-mode-disarmed" id="editor-match-mode-chip">
+            <i id="editor-match-mode-icon">lock</i>
+            <span id="editor-match-mode-text">DISARMED</span>
+          </span>
+
+          <span class="chip small" id="editor-runner-chip">
+            <i id="editor-runner-icon">playlist_play</i>
+            <span id="editor-runner-text">Auto: Idle</span>
+          </span>
+
+          <span class="chip small" id="editor-dirty-badge">
+            <i id="editor-dirty-icon">check</i>
+            <span id="editor-dirty-text">Saved</span>
+          </span>
+        </div>
+
+        <div class="row wrap middle-align" style="gap: 6px;">
+          <a class="button small border round" href="/" title="Return to Operator Console">
+            <i>arrow_back</i>
+            <span>Operator Console</span>
+          </a>
+          <button class="button small circle border" id="editor-theme-toggle-btn" title="Toggle Dark/Light Theme">
+            <i id="editor-theme-toggle-icon">light_mode</i>
+          </button>
+          <button class="button small error round" id="editor-stop-all-btn" title="Abort routine and stop all motors">
+            <i>report</i>
+            <span>STOP ALL</span>
+          </button>
+        </div>
+      </div>
+    </article>
+
+    <!-- Routine CRUD & Practice Test Toolbar -->
+    <article class="round border match-card">
+      <div class="row wrap space-between middle-align" style="gap: 8px;">
+        <div class="row wrap middle-align" style="gap: 6px;">
+          <div class="field small border round no-margin" style="width: 240px;">
+            <select id="editor-routine-select"></select>
+            <i>arrow_drop_down</i>
+          </div>
+
+          <button class="button small border round" id="editor-new-btn" title="Create a new empty routine">
+            <i>add</i>
+            <span>New</span>
+          </button>
+          <button class="button small border round" id="editor-dup-btn" title="Duplicate current routine">
+            <i>content_copy</i>
+            <span>Duplicate</span>
+          </button>
+          <button class="button small primary round" id="editor-save-btn" title="Save routine JSON to Host">
+            <i>save</i>
+            <span>Save</span>
+          </button>
+          <button class="button small border round" id="editor-set-active-btn" title="Set as active routine for Match Auto (1:00)">
+            <i>verified</i>
+            <span>Set Active for Auto</span>
+          </button>
+          <button class="button small border round" id="editor-delete-btn" title="Delete selected routine">
+            <i>delete</i>
+            <span>Delete</span>
+          </button>
+        </div>
+
+        <div class="row wrap middle-align" style="gap: 6px;">
+          <input type="file" id="editor-import-file" accept=".json,application/json" style="display: none;" />
+          <button class="button small border round" id="editor-import-btn" title="Import routine JSON file">
+            <i>upload_file</i>
+            <span>Import</span>
+          </button>
+          <button class="button small border round" id="editor-export-btn" title="Download routine JSON file">
+            <i>download</i>
+            <span>Export</span>
+          </button>
+
+          <button class="button small primary round" id="editor-test-run-btn" title="Save, switch to Practice mode if needed, and run routine">
+            <i>play_arrow</i>
+            <span>Test in Practice</span>
+          </button>
+          <button class="button small error round" id="editor-abort-run-btn" title="Abort active routine run">
+            <i>stop_circle</i>
+            <span>Abort</span>
+          </button>
+        </div>
+      </div>
+    </article>
+
+    <!-- Main 2-Column Workspace -->
+    <div class="grid dashboard-grid">
+      <!-- Left Column: Interactive 2D Field Planner -->
+      <div class="s12 m12 l5 dashboard-col">
+        <article class="round border compact-card">
+          <div class="row wrap space-between middle-align" style="gap: 6px;">
+            <div class="row middle-align" style="gap: 6px;">
+              <i class="primary-text">map</i>
+              <h6 class="no-margin">2D Field Path Planner (400 &times; 500 cm)</h6>
+            </div>
+            <span class="mono small-text" id="editor-canvas-coords">X: --- cm, Y: --- cm</span>
+          </div>
+
+          <div class="tiny-space"></div>
+
+          <!-- Canvas Tool Modes -->
+          <div class="row wrap middle-align" style="gap: 6px;">
+            <div class="row no-space">
+              <button class="button small left-round primary" id="tool-select-drag-btn" title="Click to select or drag waypoints">
+                <i>pan_tool</i>
+                <span>Drag Waypoints</span>
+              </button>
+              <button class="button small border" id="tool-add-drive-btn" title="Click anywhere on field to append a Drive To step">
+                <i>add_location_alt</i>
+                <span>+ Add Drive</span>
+              </button>
+              <button class="button small right-round border" id="tool-place-start-btn" title="Click on field to position Start Pose">
+                <i>flag</i>
+                <span>Set Start</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="row wrap middle-align" style="gap: 14px; margin-top: 6px;">
+            <label class="checkbox small-text">
+              <input type="checkbox" id="editor-snap-5cm-toggle" checked />
+              <span>Snap 5 cm</span>
+            </label>
+            <label class="checkbox small-text">
+              <input type="checkbox" id="editor-show-live-robot-toggle" checked />
+              <span>Show Live Robot</span>
+            </label>
+          </div>
+
+          <div class="tiny-space"></div>
+
+          <div class="field-map-wrap">
+            <canvas id="auto-editor-canvas" width="400" height="500"></canvas>
+          </div>
+
+          <div class="row center-align wrap small-text" style="margin-top: 6px; gap: 10px; font-size: 0.72rem;">
+            <span><span class="legend-dot" style="background: #10b981;"></span>Start Pose</span>
+            <span><span class="legend-dot" style="background: #facc15;"></span>Waypoint</span>
+            <span><span class="legend-dot" style="background: #38bdf8;"></span>Selected / Robot</span>
+            <span><span class="legend-dot" style="background: #f59e0b;"></span>Running Step</span>
+          </div>
+        </article>
+      </div>
+
+      <!-- Right Column: Metadata & Ordered Step Builder -->
+      <div class="s12 m12 l7 dashboard-col">
+        <!-- Routine Metadata -->
+        <article class="round border compact-card">
+          <div class="row wrap space-between middle-align" style="gap: 6px;">
+            <div class="row middle-align" style="gap: 6px;">
+              <i class="primary-text">tune</i>
+              <h6 class="no-margin">Routine Details &amp; Start Pose</h6>
+            </div>
+            <span class="chip small mono" id="routine-est-duration-chip">Est: 0.0s / 60.0s</span>
+          </div>
+
+          <div class="tiny-space"></div>
+
+          <div class="grid">
+            <div class="s12 m6">
+              <label class="small-text">Routine Name</label>
+              <div class="field small border round no-margin">
+                <input type="text" id="routine-name-input" maxlength="100" />
+              </div>
+            </div>
+            <div class="s12 m6">
+              <label class="small-text">Routine ID (Filename Slug)</label>
+              <div class="field small border round no-margin">
+                <input type="text" id="routine-id-input" maxlength="64" pattern="[a-zA-Z0-9_-]+" />
+              </div>
+            </div>
+            <div class="s12">
+              <label class="small-text">Description</label>
+              <div class="field small border round no-margin">
+                <input type="text" id="routine-desc-input" maxlength="400" />
+              </div>
+            </div>
+            <div class="s4">
+              <label class="small-text">Start X (cm)</label>
+              <div class="field small border round no-margin">
+                <input type="number" id="routine-start-x" min="25" max="375" step="5" />
+              </div>
+            </div>
+            <div class="s4">
+              <label class="small-text">Start Y (cm)</label>
+              <div class="field small border round no-margin">
+                <input type="number" id="routine-start-y" min="25" max="475" step="5" />
+              </div>
+            </div>
+            <div class="s4">
+              <label class="small-text">Start Heading (&deg;)</label>
+              <div class="field small border round no-margin">
+                <input type="number" id="routine-start-heading" min="0" max="359" step="5" />
+              </div>
+            </div>
+          </div>
+        </article>
+
+        <!-- Step Palette & Sequence List -->
+        <article class="round border compact-card">
+          <div class="row wrap space-between middle-align" style="gap: 6px;">
+            <div class="row middle-align" style="gap: 6px;">
+              <i class="primary-text">format_list_numbered</i>
+              <h6 class="no-margin">Step Sequence (<span id="editor-step-count">0</span>)</h6>
+            </div>
+          </div>
+
+          <div class="tiny-space"></div>
+
+          <!-- Quick-Add Palette -->
+          <div class="row wrap" style="gap: 5px;">
+            <button class="button small border round" data-add-step="wait_vision">+ Wait Vision</button>
+            <button class="button small border round" data-add-step="drive_to">+ Drive To</button>
+            <button class="button small border round" data-add-step="aim_at">+ Aim At</button>
+            <button class="button small border round" data-add-step="shooter_set">+ Shooter Set</button>
+            <button class="button small border round" data-add-step="pitch_step">+ Pitch Step</button>
+            <button class="button small border round" data-add-step="feed_balls">+ Feed Balls</button>
+            <button class="button small border round" data-add-step="wait">+ Wait</button>
+            <button class="button small border round" data-add-step="stop_all">+ Stop All</button>
+          </div>
+
+          <div class="tiny-space"></div>
+
+          <div class="editor-steps-list" id="editor-steps-container"></div>
+        </article>
+      </div>
+    </div>
+  </main>
+</body>
+</html>

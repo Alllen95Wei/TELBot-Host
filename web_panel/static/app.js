@@ -186,6 +186,8 @@ let latestTelemetryData = null;
 let latestShooterPidState = null;
 let latestConveyorState = null;
 let latestChassisPidState = null;
+let latestAutoRoutineState = null;
+let activeAutoRoutineDef = null;
 const uiAngleState = { run: false, reversed: false };
 
 // ============================================================================
@@ -198,6 +200,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   initThemeToggle();
   initModals();
   initMatchControls();
+  initAutoRoutineSync();
   initButtonGridUI();
   initMappingUI();
   initSensorTelemetryUI();
@@ -1288,15 +1291,24 @@ function controlTick() {
       : flywheel;
   document.getElementById("cmd-angle").textContent =
     angleRun ? (angleReversed ? "REV" : "FWD") : "OFF";
+  const autoRunning = Boolean(latestAutoRoutineState && latestAutoRoutineState.running);
+  const dispTrigger =
+    autoRunning && latestConveyorState ? latestConveyorState.effective_trigger : trigger;
   const conveyorSpinnerLabel =
     latestConveyorState && latestConveyorState.auto_reversing
       ? "AUTO-REV"
-      : spinnerRun
-        ? spinnerReversed
-          ? "REV"
-          : "FWD"
-        : "OFF";
-  document.getElementById("cmd-conveyor").textContent = `${trigger} | ${conveyorSpinnerLabel}`;
+      : autoRunning && latestConveyorState
+        ? latestConveyorState.effective_spinner_run
+          ? latestConveyorState.effective_spinner_reversed
+            ? "REV"
+            : "FWD"
+          : "OFF"
+        : spinnerRun
+          ? spinnerReversed
+            ? "REV"
+            : "FWD"
+          : "OFF";
+  document.getElementById("cmd-conveyor").textContent = `${dispTrigger} | ${conveyorSpinnerLabel}`;
 
   uiAngleState.run = angleRun;
   uiAngleState.reversed = angleReversed;
@@ -1499,6 +1511,9 @@ function updateStatusFromWs(msg) {
   if (msg.chassis_pid) {
     updateChassisPidUI(msg.chassis_pid);
   }
+  if (msg.auto_routine) {
+    updateAutoRoutineUI(msg.auto_routine);
+  }
   if (msg.telemetry) {
     latestTelemetryData = msg.telemetry;
     updateSensorTelemetryUI();
@@ -1535,6 +1550,9 @@ function initStatusPolling() {
         }
         if (data.chassis_pid) {
           updateChassisPidUI(data.chassis_pid);
+        }
+        if (data.auto_routine) {
+          updateAutoRoutineUI(data.auto_routine);
         }
         if (data.latest_telemetry) {
           latestTelemetryData = data.latest_telemetry;
@@ -1728,7 +1746,20 @@ function initMatchControls() {
 
   const autoBtn = document.getElementById("match-start-auto-btn");
   if (autoBtn) {
-    autoBtn.addEventListener("click", () => postMatchAction("/api/match/auto/start"));
+    autoBtn.addEventListener("click", async () => {
+      try {
+        const res = await fetch("/api/match/auto/start", { method: "POST" });
+        if (res.ok) {
+          const data = await res.json();
+          updateMatchUI(data);
+          if (data.auto_routine) {
+            updateAutoRoutineUI(data.auto_routine);
+          }
+        }
+      } catch (e) {
+        console.error("Failed match auto start:", e);
+      }
+    });
   }
 
   const teleopBtn = document.getElementById("match-enable-teleop-btn");
@@ -1748,6 +1779,146 @@ function initMatchControls() {
 
   // Smooth local timer countdown tick
   setInterval(localMatchTimerTick, 200);
+}
+
+// ============================================================================
+// Autonomous Routine Selector, Live Progress & Path Overlay
+// ============================================================================
+async function loadAutoRoutinesList() {
+  const selectEl = document.getElementById("match-auto-routine-select");
+  try {
+    const res = await fetch("/api/auto/routines");
+    if (!res.ok) return;
+    const data = await res.json();
+    const activeId = data.active_routine_id || "";
+    const routines = Array.isArray(data.routines) ? data.routines : [];
+
+    if (selectEl) {
+      selectEl.innerHTML = "";
+      for (const r of routines) {
+        const opt = document.createElement("option");
+        opt.value = r.id;
+        opt.textContent = `${r.name} (${r.step_count} steps)`;
+        if (r.id === activeId) opt.selected = true;
+        selectEl.appendChild(opt);
+      }
+    }
+
+    if (activeId) {
+      const defRes = await fetch(`/api/auto/routines/${encodeURIComponent(activeId)}`);
+      if (defRes.ok) {
+        const defData = await defRes.json();
+        activeAutoRoutineDef = defData.routine || null;
+        if (typeof drawFieldMap === "function") {
+          drawFieldMap(currentPoseState);
+        }
+      }
+    }
+
+    if (data.runner) {
+      updateAutoRoutineUI(data.runner);
+    }
+  } catch (e) {
+    console.warn("Failed to load autonomous routines:", e);
+  }
+}
+
+function initAutoRoutineSync() {
+  const selectEl = document.getElementById("match-auto-routine-select");
+  const abortBtn = document.getElementById("match-auto-abort-btn");
+
+  if (selectEl) {
+    selectEl.addEventListener("change", async () => {
+      const routineId = selectEl.value;
+      if (!routineId) return;
+      try {
+        const res = await fetch("/api/auto/active", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ routine_id: routineId }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          activeAutoRoutineDef = data.routine || null;
+          if (typeof drawFieldMap === "function") {
+            drawFieldMap(currentPoseState);
+          }
+        }
+      } catch (e) {
+        console.error("Failed to select active auto routine:", e);
+      }
+    });
+  }
+
+  if (abortBtn) {
+    abortBtn.addEventListener("click", async () => {
+      try {
+        const res = await fetch("/api/auto/abort", { method: "POST" });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.auto_routine) {
+            updateAutoRoutineUI(data.auto_routine);
+          }
+        }
+      } catch (e) {
+        console.error("Failed to abort auto routine:", e);
+      }
+    });
+  }
+
+  window.addEventListener("focus", loadAutoRoutinesList);
+  loadAutoRoutinesList();
+  setInterval(loadAutoRoutinesList, 5000);
+}
+
+function updateAutoRoutineUI(autoState) {
+  if (!autoState) return;
+  latestAutoRoutineState = autoState;
+
+  const chip = document.getElementById("auto-runner-chip");
+  const icon = document.getElementById("auto-runner-icon");
+  const text = document.getElementById("auto-runner-text");
+  const abortBtn = document.getElementById("match-auto-abort-btn");
+  const statusMsg = document.getElementById("match-status-msg");
+
+  if (abortBtn) {
+    abortBtn.style.display = autoState.running ? "inline-flex" : "none";
+  }
+
+  if (chip && icon && text) {
+    chip.classList.remove("auto-chip-running", "auto-chip-completed", "auto-chip-aborted");
+    if (autoState.running) {
+      chip.classList.add("auto-chip-running");
+      icon.textContent = "smart_toy";
+      const stepNum = Number(autoState.current_step_index || 0) + 1;
+      const total = Number(autoState.total_steps || 0);
+      const label = autoState.current_step_label || autoState.current_step_type || "Running";
+      if (autoState.current_step_type === "feed_balls") {
+        text.textContent = `Step ${stepNum}/${total}: ${label} (${autoState.balls_fed_in_step || 0} fed, ${Number(autoState.step_elapsed_s || 0).toFixed(1)}s)`;
+      } else {
+        text.textContent = `Step ${stepNum}/${total}: ${label} (${Number(autoState.step_elapsed_s || 0).toFixed(1)}/${Number(autoState.step_timeout_s || 0).toFixed(1)}s)`;
+      }
+    } else if (autoState.status === "completed") {
+      chip.classList.add("auto-chip-completed");
+      icon.textContent = "check_circle";
+      text.textContent = `Auto: Completed (${Number(autoState.routine_elapsed_s || 0).toFixed(1)}s)`;
+    } else if (autoState.status === "aborted") {
+      chip.classList.add("auto-chip-aborted");
+      icon.textContent = "cancel";
+      text.textContent = "Auto: Aborted";
+    } else {
+      icon.textContent = "playlist_play";
+      text.textContent = "Auto: Idle";
+    }
+  }
+
+  if (statusMsg && currentMatchState && currentMatchState.mode === "auto" && autoState.status_message) {
+    statusMsg.textContent = autoState.status_message;
+  }
+
+  if (typeof drawFieldMap === "function") {
+    drawFieldMap(currentPoseState);
+  }
 }
 
 // ============================================================================
@@ -2033,6 +2204,9 @@ function initFieldPoseMap() {
         }
         if (data.chassis_pid) {
           updateChassisPidUI(data.chassis_pid);
+        }
+        if (data.auto_routine) {
+          updateAutoRoutineUI(data.auto_routine);
         }
       } catch (e) {
         console.error("Failed to send P2P goto:", e);
@@ -2342,6 +2516,65 @@ function drawFieldMap(pose) {
     ctx.strokeStyle = "rgba(56, 189, 248, 0.45)";
     ctx.lineWidth = 2;
     ctx.stroke();
+  }
+
+  // 5a. Draw Active Autonomous Routine Planned Path
+  if (activeAutoRoutineDef && Array.isArray(activeAutoRoutineDef.steps)) {
+    const waypoints = [];
+    const sp = activeAutoRoutineDef.start_pose;
+    if (sp && typeof sp.x_cm === "number" && typeof sp.y_cm === "number") {
+      waypoints.push({ x: sp.x_cm, y: sp.y_cm, stepIdx: -1, label: "S" });
+    }
+    activeAutoRoutineDef.steps.forEach((st, idx) => {
+      if (st && st.type === "drive_to" && typeof st.x_cm === "number" && typeof st.y_cm === "number") {
+        waypoints.push({ x: st.x_cm, y: st.y_cm, stepIdx: idx, label: String(idx + 1) });
+      }
+    });
+
+    if (waypoints.length > 0) {
+      ctx.save();
+      if (waypoints.length > 1) {
+        ctx.beginPath();
+        ctx.setLineDash([4, 4]);
+        waypoints.forEach((wp, i) => {
+          const wx = toPxX(wp.x);
+          const wy = toPxY(wp.y);
+          if (i === 0) ctx.moveTo(wx, wy);
+          else ctx.lineTo(wx, wy);
+        });
+        ctx.strokeStyle = "rgba(250, 204, 21, 0.45)";
+        ctx.lineWidth = 1.6;
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+
+      const activeIdx =
+        latestAutoRoutineState && latestAutoRoutineState.running
+          ? Number(latestAutoRoutineState.current_step_index)
+          : -99;
+
+      for (const wp of waypoints) {
+        const wx = toPxX(wp.x);
+        const wy = toPxY(wp.y);
+        const isCurrent = wp.stepIdx === activeIdx;
+        ctx.beginPath();
+        ctx.arc(wx, wy, isCurrent ? 7 : 5, 0, Math.PI * 2);
+        ctx.fillStyle =
+          wp.stepIdx === -1
+            ? "rgba(16, 185, 129, 0.75)"
+            : isCurrent
+              ? "#f59e0b"
+              : "rgba(250, 204, 21, 0.75)";
+        ctx.fill();
+
+        ctx.fillStyle = "#0b0f17";
+        ctx.font = "bold 8px monospace";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(wp.label, wx, wy + 0.5);
+      }
+      ctx.restore();
+    }
   }
 
   // 5b. Draw Chassis P2P Target Waypoint Overlay (when active or recently arrived)

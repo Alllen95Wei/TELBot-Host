@@ -455,7 +455,11 @@ class PoseEstimator:
 # ==============================================================================
 if __name__ == "__main__":
     print("Testing PoseEstimator (3-LiDAR Front + Right + Left mode) on 400cm (W) x 500cm (L) field...")
-    est = PoseEstimator()
+    est = PoseEstimator(
+        front_offset_cm=(0.0, 0.0),
+        left_offset_cm=(0.0, 0.0),
+        right_offset_cm=(0.0, 0.0),
+    )
 
     # 1. Robot at (x=150, y=120), facing Top wall (0 deg):
     #    dist_front = 3800 mm (380 cm)
@@ -484,4 +488,12 @@ if __name__ == "__main__":
     )
     assert p3.lr_status == "both_valid" and p3.x_cm == 156.0 and p3.y_cm == 128.0
     print("3. 3-LiDAR Right recovery passed:", p3.lr_status, f"x={p3.x_cm}, y={p3.y_cm}")
+
+    # 4. Verify configured PoseSensor mounting offsets apply when using defaults
+    est_cfg = PoseEstimator()
+    p_cfg = est_cfg.update_from_mm(
+        dist_front_mm=3800, dist_right_mm=2500, dist_left_mm=1500, raw_heading_deg=0.0
+    )
+    assert p_cfg.valid
+    assert abs(p_cfg.y_cm - (500.0 - 380.0 - PoseSensorConfig.FRONT_OFFSET_Y_CM)) < 0.05
     print("All PoseEstimator tests passed!")

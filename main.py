@@ -20,6 +20,7 @@ from config import Server as ServerConfig
 from config import ShooterPID as ShooterPIDConfig
 from config import UART as UARTConfig
 from core import (
+    AutoRoutineRunner,
     ChassisPoseController,
     CmdType,
     ConveyorController,
@@ -29,20 +30,24 @@ from core import (
     Packet,
     PartType,
     PoseEstimator,
+    RoutineStore,
     ShooterSpeedController,
     UARTComm,
     VisionManager,
+    step_auto_routine,
     step_chassis_control,
     step_conveyor_control,
     step_shooter_control,
 )
 from web_panel.server import (
     app,
+    set_auto_runner,
     set_chassis_controller,
     set_conveyor_controller,
     set_esp32_receiver,
     set_match_manager,
     set_pose_estimator,
+    set_routine_store,
     set_shooter_controller,
     set_uart_comm,
     set_vision_manager,
@@ -256,6 +261,8 @@ class RobotHost:
         self.shooter_controller = ShooterSpeedController()
         self.conveyor_controller = ConveyorController()
         self.chassis_controller = ChassisPoseController()
+        self.routine_store = RoutineStore()
+        self.auto_runner = AutoRoutineRunner(self.routine_store)
         self.match_manager = MatchManager(on_stop_required=self._handle_match_stop)
         self.vision_manager = VisionManager()
 
@@ -277,7 +284,8 @@ class RobotHost:
     # Hardware Callbacks (Thread-safe)
     # --------------------------------------------------------------------------
     def _handle_match_stop(self) -> None:
-        """Stops closed-loop controllers and halts all slave actuators."""
+        """Stops closed-loop controllers, aborts any running auto routine, and halts all slave actuators."""
+        self.auto_runner.abort("Match stopped")
         self.shooter_controller.stop()
         self.conveyor_controller.stop()
         self.chassis_controller.stop()
@@ -285,6 +293,7 @@ class RobotHost:
 
     def _handle_estop_press(self) -> None:
         """Called directly from the GPIO interrupt thread when E-Stop engages."""
+        self.auto_runner.abort("Physical E-Stop triggered")
         self.shooter_controller.stop()
         self.conveyor_controller.stop()
         self.chassis_controller.stop()
@@ -395,6 +404,20 @@ class RobotHost:
             # 1. Periodic match state machine evaluation
             self.match_manager.tick()
 
+            # 1b. 50 Hz autonomous routine sequence runner (before subsystem PID ticks)
+            step_auto_routine(
+                runner=self.auto_runner,
+                uart=self.uart,
+                match_manager=self.match_manager,
+                pose_estimator=self.pose_estimator,
+                vision_manager=self.vision_manager,
+                esp32_receiver=self.esp32,
+                chassis_controller=self.chassis_controller,
+                shooter_controller=self.shooter_controller,
+                conveyor_controller=self.conveyor_controller,
+                now=now,
+            )
+
             # 2. Periodic 200ms PING heartbeat to Pico
             if (now - last_ping) >= self.ping_interval:
                 self.uart.send_ping()
@@ -489,6 +512,8 @@ class RobotHost:
             set_shooter_controller(self.shooter_controller)
             set_conveyor_controller(self.conveyor_controller)
             set_chassis_controller(self.chassis_controller)
+            set_routine_store(self.routine_store)
+            set_auto_runner(self.auto_runner)
             set_match_manager(self.match_manager)
             set_vision_manager(self.vision_manager)
             app.state.control_loop_managed = True
@@ -515,7 +540,8 @@ class RobotHost:
                 safety_task.cancel()
                 await asyncio.gather(safety_task, return_exceptions=True)
 
-            # Reset closed-loop controllers before releasing GPIO / stopping UART
+            # Reset closed-loop controllers & auto runner before releasing GPIO / stopping UART
+            self.auto_runner.abort("Host shutting down")
             self.shooter_controller.stop()
             self.conveyor_controller.stop()
             self.chassis_controller.stop()

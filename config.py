@@ -193,3 +193,14 @@ class ChassisPID:
     POSE_STALE_TIMEOUT_S = 0.5
     MAX_BLIND_HOLD_S = 0.25
     WALL_MARGIN_CM = 25.0
+
+
+class AutoRoutine:
+    """Autonomous routine storage and 50 Hz sequence runner configuration."""
+
+    ROUTINES_DIR = "routines"
+    ACTIVE_STATE_FILE = "_active.json"
+    DEFAULT_ROUTINE_ID = "default_1x3_auto"
+    MAX_STEPS = 32
+    MAX_ROUTINE_DURATION_S = 60.0
+    OPEN_LOOP_SPINUP_WAIT_S = 0.6  # Fallback spin-up wait when ESP32 RPM telemetry is offline

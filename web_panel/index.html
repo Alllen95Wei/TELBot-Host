@@ -122,6 +122,10 @@
                 <i id="match-mode-icon">lock</i>
                 <span id="match-mode-text">DISARMED</span>
               </span>
+              <span class="chip small" id="auto-runner-chip" title="Autonomous Routine Runner Progress">
+                <i id="auto-runner-icon">playlist_play</i>
+                <span id="auto-runner-text">Auto: Idle</span>
+              </span>
             </div>
             <small class="mono" id="match-status-msg">Enable Tele-Op or Start Auto to begin match.</small>
           </div>
@@ -139,6 +143,23 @@
 
         <!-- Operator Action Buttons -->
         <div class="row wrap middle-align" style="gap: 6px;">
+          <div class="field small border round no-margin" style="width: 190px;" title="Active Autonomous Routine">
+            <select id="match-auto-routine-select" title="Select Autonomous Routine">
+              <option value="">Loading routines...</option>
+            </select>
+            <i>arrow_drop_down</i>
+          </div>
+
+          <a class="button small border round" href="/auto" target="_blank" id="open-auto-editor-link" title="Open Autonomous Routine Editor in new tab">
+            <i>route</i>
+            <span>Auto Editor</span>
+          </a>
+
+          <button class="button small error round" id="match-auto-abort-btn" style="display: none;" title="Abort running Autonomous routine">
+            <i>stop_circle</i>
+            <span>Abort Auto</span>
+          </button>
+
           <button class="button small border round" id="match-start-auto-btn" title="Start Autonomous (1:00) - Controllers Locked">
             <i>smart_toy</i>
             <span>Start Auto (1:00)</span>

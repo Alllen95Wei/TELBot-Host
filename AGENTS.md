@@ -59,13 +59,15 @@ When Auto expires, the robot immediately stops all motors and enters `AUTO_WAIT`
 - [x] **Chassis Pose-to-Point (P2P) PID Controller (`core/control.py`, `core/pose.py`, `config.py`, `main.py`, `web_panel/`)**:
   - Implemented `ChassisControlState`, `ChassisPoseController`, and `step_chassis_control` (`core/control.py`) with 3 decoupled `PIDController` instances (`kv=0, ks=0, zero_on_zero_setpoint=False`, `angle_wrap=True` on heading only), direction-preserving vector speed cap, field-to-body velocity rotation, blind-LiDAR rotation fallback (`MAX_BLIND_HOLD_S`), monotonic pose staleness protection (`PoseEstimate.monotonic_time`), and dwell-settled `stop_on_arrival=True` behavior.
   - Integrated 50 Hz `step_chassis_control` into `main.py` and standalone `web_panel/server.py` (gated to `MatchMode.AUTO` and `MatchMode.PRACTICE` with driver preemption on non-zero manual input), plus `/api/chassis/{pid,goto,cancel}` endpoints and 2D field map / Practice test modal controls in `web_panel/`.
+- [x] **Autonomous Routine Storage, 50 Hz Runner & Web UI Editor (`core/auto_routine.py`, `routines/`, `main.py`, `web_panel/`)**:
+  - Implemented `AutoStepType`, `AutoStep`, `AutoRoutineDefinition`, and `RoutineStore` (`core/auto_routine.py`) persisting validated JSON routines in `routines/*.json` and active selection in `routines/_active.json` (with 2 seeded starter routines and wall-margin clamping).
+  - Implemented 50 Hz `AutoRoutineRunner` & `step_auto_routine` coordinating `ChassisPoseController`, `ShooterSpeedController`, `ConveyorController`, `VisionManager`, and `UARTComm` across all 8 step types (`wait_vision`, `drive_to`, `aim_at`, `shooter_set`, `pitch_step`, `feed_balls`, `wait`, `stop_all`) with automatic `AUTO` launch, 60 s phase cutoff, `PRACTICE` test execution, instant driver preemption, and E-Stop abort.
+  - Added dedicated interactive Web UI editor page (`/auto` $\to$ `web_panel/auto_editor.html`, `web_panel/static/auto_editor.js`) with a `400 × 500 cm` drag/click waypoint canvas and step sequence builder, plus live routine selection, step progress badge (`#auto-runner-chip`), `Abort Auto`, and path overlay on the main operator console (`/`).
 
 ## Undone Tasks
 
 1. **ESP32 Sender Firmware Implementation (Planned)**:
    - Implement ESP32 firmware to read Upper/Lower flywheel RPMs, geomagnetic heading (deg), Front/Right/Left LiDAR distances (mm), and IR ball sensor state (`ball_detected`), pack the 26-byte `<hhhIIIB` frame with CRC-8 (`0x07`), and transmit at 50 Hz over 115200 baud UART to RPi 5 — see [ESP32.md](docs/ESP32.md) for full wire protocol & reference C++ sender code.
-2. **Autonomous Routine Storage & Workflow**:
-   - Sequence runner executing fixed steps during the 1:00 Auto phase (e.g. drive to point $\to$ align $\to$ spin up flywheels $\to$ feed balls), authored via an interactive **Web UI editor** (backed by structured JSON routine definitions on the Host).
 
 ---
 

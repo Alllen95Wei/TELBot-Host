@@ -1,0 +1,51 @@
+{
+  "id": "left_flank_1x3_auto",
+  "name": "Left Flank -> Active 1x3 (2 Balls)",
+  "description": "Starts on left side, waits for 1x3 vision latch, advances to (140, 290) aimed at active 1x3 goal, shoots 2 balls, then stops.",
+  "start_pose": {
+    "x_cm": 110.0,
+    "y_cm": 80.0,
+    "heading_deg": 0.0
+  },
+  "updated_at": 1795118612.2704494,
+  "steps": [
+    {
+      "id": "step_1",
+      "type": "wait_vision",
+      "label": "Wait for YOLO 1x3 Latch",
+      "timeout_s": 2.0,
+      "fallback_target": "left"
+    },
+    {
+      "id": "step_2",
+      "type": "drive_to",
+      "label": "Advance Left Shooting Lane",
+      "x_cm": 140.0,
+      "y_cm": 290.0,
+      "aim_mode": "active_1x3",
+      "heading_deg": 0.0,
+      "goal_column": "left",
+      "stop_on_arrival": true,
+      "pre_spin_shooter": true,
+      "shooter_mode": "auto",
+      "shooter_rpm": 3600.0,
+      "timeout_s": 5.0
+    },
+    {
+      "id": "step_3",
+      "type": "feed_balls",
+      "label": "Feed 2 Balls",
+      "trigger_speed": 700,
+      "spinner_run": true,
+      "require_at_speed": true,
+      "at_speed_timeout_s": 1.5,
+      "ball_count": 2,
+      "duration_s": 2.5
+    },
+    {
+      "id": "step_4",
+      "type": "stop_all",
+      "label": "Safe Stop"
+    }
+  ]
+}
