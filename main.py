@@ -20,6 +20,7 @@ from config import Server as ServerConfig
 from config import ShooterPID as ShooterPIDConfig
 from config import UART as UARTConfig
 from core import (
+    ChassisPoseController,
     CmdType,
     ConveyorController,
     ESP32SensorReceiver,
@@ -31,11 +32,13 @@ from core import (
     ShooterSpeedController,
     UARTComm,
     VisionManager,
+    step_chassis_control,
     step_conveyor_control,
     step_shooter_control,
 )
 from web_panel.server import (
     app,
+    set_chassis_controller,
     set_conveyor_controller,
     set_esp32_receiver,
     set_match_manager,
@@ -252,6 +255,7 @@ class RobotHost:
         self.pose_estimator = PoseEstimator()
         self.shooter_controller = ShooterSpeedController()
         self.conveyor_controller = ConveyorController()
+        self.chassis_controller = ChassisPoseController()
         self.match_manager = MatchManager(on_stop_required=self._handle_match_stop)
         self.vision_manager = VisionManager()
 
@@ -273,15 +277,17 @@ class RobotHost:
     # Hardware Callbacks (Thread-safe)
     # --------------------------------------------------------------------------
     def _handle_match_stop(self) -> None:
-        """Stops closed-loop flywheel & conveyor controllers and halts all slave actuators."""
+        """Stops closed-loop controllers and halts all slave actuators."""
         self.shooter_controller.stop()
         self.conveyor_controller.stop()
+        self.chassis_controller.stop()
         self.uart.send_stop()
 
     def _handle_estop_press(self) -> None:
         """Called directly from the GPIO interrupt thread when E-Stop engages."""
         self.shooter_controller.stop()
         self.conveyor_controller.stop()
+        self.chassis_controller.stop()
         self.uart.trigger_estop()
 
     def _handle_estop_release(self) -> None:
@@ -366,6 +372,7 @@ class RobotHost:
         last_ping = 0.0
         last_sent_flywheel = (0, 0)
         last_sent_spinner = (False, False)
+        last_sent_drive = (0, 0, 0)
         tick_interval = 1.0 / max(1.0, float(ShooterPIDConfig.CONTROL_LOOP_HZ))
 
         while not self._restart_requested:
@@ -427,6 +434,16 @@ class RobotHost:
                 now=now,
             )
 
+            # 6. 50 Hz closed-loop chassis Pose-to-Point PID tick
+            last_sent_drive = step_chassis_control(
+                controller=self.chassis_controller,
+                uart=self.uart,
+                match_manager=self.match_manager,
+                pose_estimator=self.pose_estimator,
+                last_sent_drive=last_sent_drive,
+                now=now,
+            )
+
             elapsed = time.monotonic() - loop_start
             await asyncio.sleep(max(0.001, tick_interval - elapsed))
 
@@ -471,6 +488,7 @@ class RobotHost:
             set_pose_estimator(self.pose_estimator)
             set_shooter_controller(self.shooter_controller)
             set_conveyor_controller(self.conveyor_controller)
+            set_chassis_controller(self.chassis_controller)
             set_match_manager(self.match_manager)
             set_vision_manager(self.vision_manager)
             app.state.control_loop_managed = True
@@ -497,9 +515,10 @@ class RobotHost:
                 safety_task.cancel()
                 await asyncio.gather(safety_task, return_exceptions=True)
 
-            # Reset flywheel PID & conveyor controllers before releasing GPIO / stopping UART
+            # Reset closed-loop controllers before releasing GPIO / stopping UART
             self.shooter_controller.stop()
             self.conveyor_controller.stop()
+            self.chassis_controller.stop()
 
             # Release GPIO line before stopping UART or restarting process
             self.estop.stop()

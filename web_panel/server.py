@@ -28,6 +28,7 @@ from config import ShooterPID as ShooterPIDConfig
 from config import SpecialGrid as SpecialGridConfig
 from config import UART as UARTConfig
 from core import (
+    ChassisPoseController,
     ConveyorController,
     ESP32SensorReceiver,
     ESP32SensorSnapshot,
@@ -39,6 +40,7 @@ from core import (
     UARTComm,
     VisionManager,
     VisionTarget,
+    step_chassis_control,
     step_conveyor_control,
     step_shooter_control,
 )
@@ -56,11 +58,13 @@ uart = UARTComm(
 pose_estimator = PoseEstimator()
 shooter_controller = ShooterSpeedController()
 conveyor_controller = ConveyorController()
+chassis_controller = ChassisPoseController()
 
 
 def _on_match_stop_with_comm(comm_ref: UARTComm) -> None:
     get_shooter_controller().stop()
     get_conveyor_controller().stop()
+    get_chassis_controller().stop()
     comm_ref.send_stop()
 
 
@@ -172,6 +176,18 @@ def get_conveyor_controller() -> ConveyorController:
     return getattr(app.state, "conveyor_controller", conveyor_controller)
 
 
+def set_chassis_controller(controller: ChassisPoseController) -> None:
+    """Injects an externally managed ChassisPoseController instance (used by main.py)."""
+    global chassis_controller
+    chassis_controller = controller
+    app.state.chassis_controller = controller
+
+
+def get_chassis_controller() -> ChassisPoseController:
+    """Returns the active ChassisPoseController instance."""
+    return getattr(app.state, "chassis_controller", chassis_controller)
+
+
 def _build_combined_telemetry() -> Optional[dict]:
     """
     Merges latest telemetry from Pico UART and ESP32 Sensor UART into a single
@@ -207,6 +223,7 @@ def _build_combined_telemetry() -> Optional[dict]:
     if combined:
         combined["shooter_pid"] = get_shooter_controller().get_status()
         combined["conveyor"] = get_conveyor_controller().get_status()
+        combined["chassis_pid"] = get_chassis_controller().get_status()
         return combined
     return None
 
@@ -249,17 +266,19 @@ async def lifespan(app: FastAPI):
             tick_interval = 1.0 / max(1.0, float(ShooterPIDConfig.CONTROL_LOOP_HZ))
             last_sent_flywheel = (0, 0)
             last_sent_spinner = (False, False)
+            last_sent_drive = (0, 0, 0)
             while True:
                 loop_start = time.monotonic()
                 comm_ref = get_uart_comm()
                 match_ref = get_match_manager()
                 esp32_ref = get_esp32_receiver()
+                pose_ref = get_pose_estimator()
                 shooter_ref = get_shooter_controller()
                 last_sent_flywheel = step_shooter_control(
                     controller=shooter_ref,
                     uart=comm_ref,
                     match_manager=match_ref,
-                    pose_estimator=get_pose_estimator(),
+                    pose_estimator=pose_ref,
                     vision_manager=get_vision_manager(),
                     esp32_receiver=esp32_ref,
                     last_sent_flywheel=last_sent_flywheel,
@@ -272,6 +291,14 @@ async def lifespan(app: FastAPI):
                     match_manager=match_ref,
                     esp32_receiver=esp32_ref,
                     last_sent_spinner=last_sent_spinner,
+                    now=loop_start,
+                )
+                last_sent_drive = step_chassis_control(
+                    controller=get_chassis_controller(),
+                    uart=comm_ref,
+                    match_manager=match_ref,
+                    pose_estimator=pose_ref,
+                    last_sent_drive=last_sent_drive,
                     now=loop_start,
                 )
                 elapsed = time.monotonic() - loop_start
@@ -288,6 +315,7 @@ async def lifespan(app: FastAPI):
         await asyncio.gather(pid_task, return_exceptions=True)
         get_shooter_controller().stop()
         get_conveyor_controller().stop()
+        get_chassis_controller().stop()
 
     # Terminate any active uStreamer proxy connections on server shutdown
     for w in list(_active_stream_writers):
@@ -364,6 +392,24 @@ def _require_teleop_allowed() -> UARTComm:
     return comm
 
 
+def _require_chassis_p2p_practice_allowed() -> UARTComm:
+    """
+    Validates that UART is ready, E-Stop is not active, and current match mode
+    is PRACTICE (remote P2P waypoint triggers are locked out in AUTO and TELEOP).
+    """
+    comm = _require_ready_uart()
+    mode = get_match_manager().mode
+    if mode != MatchMode.PRACTICE:
+        raise HTTPException(
+            status_code=423,
+            detail=(
+                "Chassis P2P waypoint command rejected: only permitted in PRACTICE mode "
+                f"(current mode: {mode.value})"
+            ),
+        )
+    return comm
+
+
 # ==============================================================================
 # Request Models
 # ==============================================================================
@@ -371,6 +417,43 @@ class DriveRequest(BaseModel):
     vx: int = Field(default=0, ge=-1000, le=1000, description="Forward/backward velocity (-1000 to +1000)")
     vy: int = Field(default=0, ge=-1000, le=1000, description="Strafe left/right velocity (-1000 to +1000)")
     omega: int = Field(default=0, ge=-1000, le=1000, description="Rotational angular velocity (-1000 to +1000)")
+
+
+class ChassisPIDUpdateRequest(BaseModel):
+    axis: str = Field(default="all", description="Target axis for gain updates: 'x', 'y', 'xy', 'heading', or 'all'")
+    kp: Optional[float] = Field(default=None, ge=0.0)
+    ki: Optional[float] = Field(default=None, ge=0.0)
+    kd: Optional[float] = Field(default=None, ge=0.0)
+    max_linear_speed: Optional[float] = Field(default=None, gt=0.0, le=1000.0)
+    max_angular_speed: Optional[float] = Field(default=None, gt=0.0, le=1000.0)
+    min_linear_cmd: Optional[float] = Field(default=None, ge=0.0, le=1000.0)
+    min_angular_cmd: Optional[float] = Field(default=None, ge=0.0, le=1000.0)
+    pos_tolerance_cm: Optional[float] = Field(default=None, ge=0.0)
+    heading_tolerance_deg: Optional[float] = Field(default=None, ge=0.0, le=180.0)
+    settle_time_s: Optional[float] = Field(default=None, ge=0.0)
+    pose_stale_timeout_s: Optional[float] = Field(default=None, gt=0.0)
+    max_blind_hold_s: Optional[float] = Field(default=None, ge=0.0)
+    wall_margin_cm: Optional[float] = Field(default=None, ge=0.0)
+    enabled: Optional[bool] = Field(default=None, description="Enable or disable chassis P2P PID")
+    reset: bool = Field(default=False, description="Reset PID integrators and settle timers")
+
+
+class ChassisGotoRequest(BaseModel):
+    target_x_cm: float = Field(..., description="Target field X coordinate in cm")
+    target_y_cm: float = Field(..., description="Target field Y coordinate in cm")
+    target_heading_deg: Optional[float] = Field(
+        default=None, description="Target field heading in degrees (0 deg = Top wall)"
+    )
+    aim_at_goal: bool = Field(
+        default=False,
+        description="Compute target heading automatically to aim at active/center goal",
+    )
+    goal_x_cm: Optional[float] = Field(default=None, description="Optional explicit goal X coordinate (cm)")
+    goal_y_cm: Optional[float] = Field(default=None, description="Optional explicit goal Y coordinate (cm)")
+    stop_on_arrival: bool = Field(
+        default=True,
+        description="Automatically disable P2P and stop chassis once settled at target",
+    )
 
 
 class ShooterRequest(BaseModel):
@@ -535,6 +618,7 @@ def get_status():
         "pose": latest_pose.to_dict() if latest_pose is not None else None,
         "shooter_pid": get_shooter_controller().get_status(),
         "conveyor": get_conveyor_controller().get_status(),
+        "chassis_pid": get_chassis_controller().get_status(),
     }
 
 
@@ -718,11 +802,154 @@ def calibrate_pose(req: PoseCalibrateRequest):
 def drive_robot(req: DriveRequest):
     """
     Appends a new chassis drive command into the TX PriorityQueue (Priority 2).
-    Thread-safe and returns immediately.
+    Any non-zero manual drive command immediately cancels active Chassis P2P PID.
     """
     comm = _require_teleop_allowed()
-    comm.send_drive(vx=req.vx, vy=req.vy, omega=req.omega)
-    return {"status": "enqueued", "subsystem": "chassis", "vx": req.vx, "vy": req.vy, "omega": req.omega}
+    chassis_ctrl = get_chassis_controller()
+    if req.vx != 0 or req.vy != 0 or req.omega != 0:
+        chassis_ctrl.stop()
+        comm.send_drive(vx=req.vx, vy=req.vy, omega=req.omega)
+        return {"status": "enqueued", "subsystem": "chassis", "vx": req.vx, "vy": req.vy, "omega": req.omega}
+
+    if chassis_ctrl.enabled:
+        return {
+            "status": "ignored_p2p_active",
+            "subsystem": "chassis",
+            "vx": 0,
+            "vy": 0,
+            "omega": 0,
+            "chassis_pid": chassis_ctrl.get_status(),
+        }
+
+    comm.send_drive(vx=0, vy=0, omega=0)
+    return {"status": "enqueued", "subsystem": "chassis", "vx": 0, "vy": 0, "omega": 0}
+
+
+@app.get("/api/chassis/pid")
+def get_chassis_pid():
+    """Returns current 3-DOF chassis P2P PID status, gains, and configuration."""
+    ctrl = get_chassis_controller()
+    return {
+        "status": "ok",
+        "state": ctrl.get_status(),
+        "gains": ctrl.get_gains(),
+        "config": ctrl.get_config(),
+    }
+
+
+@app.post("/api/chassis/pid")
+def update_chassis_pid(req: ChassisPIDUpdateRequest):
+    """Updates chassis P2P PID gains, speed caps, tolerances, enable state, or reset."""
+    ctrl = get_chassis_controller()
+    try:
+        if any(g is not None for g in (req.kp, req.ki, req.kd)):
+            ctrl.set_gains(
+                axis=req.axis,
+                kp=req.kp,
+                ki=req.ki,
+                kd=req.kd,
+            )
+        if any(
+            v is not None
+            for v in (
+                req.max_linear_speed,
+                req.max_angular_speed,
+                req.min_linear_cmd,
+                req.min_angular_cmd,
+                req.pos_tolerance_cm,
+                req.heading_tolerance_deg,
+                req.settle_time_s,
+                req.pose_stale_timeout_s,
+                req.max_blind_hold_s,
+                req.wall_margin_cm,
+            )
+        ):
+            ctrl.set_config(
+                max_linear_speed=req.max_linear_speed,
+                max_angular_speed=req.max_angular_speed,
+                min_linear_cmd=req.min_linear_cmd,
+                min_angular_cmd=req.min_angular_cmd,
+                pos_tolerance_cm=req.pos_tolerance_cm,
+                heading_tolerance_deg=req.heading_tolerance_deg,
+                settle_time_s=req.settle_time_s,
+                pose_stale_timeout_s=req.pose_stale_timeout_s,
+                max_blind_hold_s=req.max_blind_hold_s,
+                wall_margin_cm=req.wall_margin_cm,
+            )
+        if req.enabled is not None:
+            ctrl.set_enabled(req.enabled)
+        if req.reset:
+            ctrl.reset()
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {
+        "status": "ok",
+        "state": ctrl.get_status(),
+        "gains": ctrl.get_gains(),
+        "config": ctrl.get_config(),
+    }
+
+
+@app.post("/api/chassis/goto")
+def goto_chassis_waypoint(req: ChassisGotoRequest):
+    """Starts a closed-loop P2P move to a field waypoint (Practice mode only)."""
+    _require_chassis_p2p_practice_allowed()
+    ctrl = get_chassis_controller()
+    try:
+        if req.aim_at_goal or req.target_heading_deg is None:
+            if req.goal_x_cm is not None and req.goal_y_cm is not None:
+                gx = req.goal_x_cm
+                gy = req.goal_y_cm
+            else:
+                vt = get_vision_manager().latest_target
+                if (
+                    vt is not None
+                    and vt.latched
+                    and vt.target_x_cm is not None
+                    and vt.target_y_cm is not None
+                ):
+                    gx = vt.target_x_cm
+                    gy = vt.target_y_cm
+                else:
+                    gx = SpecialGridConfig.CENTER_X_CM
+                    gy = SpecialGridConfig.TOP_Y_CM
+            ctrl.set_target_aim_at_goal(
+                target_x_cm=req.target_x_cm,
+                target_y_cm=req.target_y_cm,
+                goal_x_cm=gx,
+                goal_y_cm=gy,
+                enable=True,
+                stop_on_arrival=req.stop_on_arrival,
+            )
+        else:
+            ctrl.set_target(
+                target_x_cm=req.target_x_cm,
+                target_y_cm=req.target_y_cm,
+                target_heading_deg=req.target_heading_deg,
+                enable=True,
+                stop_on_arrival=req.stop_on_arrival,
+            )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {
+        "status": "ok",
+        "chassis_pid": ctrl.get_status(),
+    }
+
+
+@app.post("/api/chassis/cancel")
+def cancel_chassis_waypoint():
+    """Cancels active chassis P2P PID motion and zeroes chassis velocity."""
+    comm = _require_ready_uart()
+    ctrl = get_chassis_controller()
+    ctrl.stop()
+    comm.send_drive(0, 0, 0)
+    return {
+        "status": "cancelled",
+        "chassis_pid": ctrl.get_status(),
+    }
 
 
 @app.post("/api/shooter")
@@ -975,6 +1202,8 @@ def stop_robot(req: StopRequest):
     Purges any stale drive commands to halt motors instantly.
     """
     part = PartType(req.part)
+    if part in (PartType.ALL, PartType.CHASSIS):
+        get_chassis_controller().stop()
     if part in (PartType.ALL, PartType.SHOOTER):
         get_shooter_controller().stop()
     if part in (PartType.ALL, PartType.CONVEYOR):
@@ -1187,7 +1416,15 @@ async def websocket_control(websocket: WebSocket):
                 vx = int(data.get("vx", 0))
                 vy = int(data.get("vy", 0))
                 omega = int(data.get("omega", 0))
-                accepted = comm.send_drive(vx=vx, vy=vy, omega=omega)
+                chassis_ctrl = get_chassis_controller()
+                if vx != 0 or vy != 0 or omega != 0:
+                    chassis_ctrl.stop()
+                    accepted = comm.send_drive(vx=vx, vy=vy, omega=omega)
+                elif chassis_ctrl.enabled:
+                    # Ignore idle centered-stick keep-alives while closed-loop P2P is driving
+                    accepted = True
+                else:
+                    accepted = comm.send_drive(vx=0, vy=0, omega=0)
 
             elif msg_type == "shooter":
                 if comm.estop_active:
@@ -1229,6 +1466,8 @@ async def websocket_control(websocket: WebSocket):
             elif msg_type == "stop":
                 part_val = int(data.get("part", PartType.ALL.value))
                 part = PartType(part_val)
+                if part in (PartType.ALL, PartType.CHASSIS):
+                    get_chassis_controller().stop()
                 if part in (PartType.ALL, PartType.SHOOTER):
                     get_shooter_controller().stop()
                 if part in (PartType.ALL, PartType.CONVEYOR):
@@ -1265,15 +1504,18 @@ async def websocket_control(websocket: WebSocket):
                 "pose": latest_pose.to_dict() if latest_pose is not None else None,
                 "shooter_pid": get_shooter_controller().get_status(),
                 "conveyor": get_conveyor_controller().get_status(),
+                "chassis_pid": get_chassis_controller().get_status(),
             })
 
     except WebSocketDisconnect:
         logger.info("WebSocket client disconnected. Issuing safety stop...")
+        get_chassis_controller().stop()
         get_shooter_controller().stop()
         get_conveyor_controller().stop()
         comm.send_stop()
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
+        get_chassis_controller().stop()
         get_shooter_controller().stop()
         get_conveyor_controller().stop()
         comm.send_stop()

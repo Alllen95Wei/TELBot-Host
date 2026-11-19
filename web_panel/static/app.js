@@ -185,6 +185,7 @@ let shooterSpeedMode = "auto"; // "auto" (Distance-based) or "manual"
 let latestTelemetryData = null;
 let latestShooterPidState = null;
 let latestConveyorState = null;
+let latestChassisPidState = null;
 const uiAngleState = { run: false, reversed: false };
 
 // ============================================================================
@@ -1277,9 +1278,10 @@ function controlTick() {
   const spinnerReversed = Boolean(spinRevHeld);
 
   // Update UI Telemetry Cards
-  document.getElementById("cmd-vx").textContent = vx;
-  document.getElementById("cmd-vy").textContent = vy;
-  document.getElementById("cmd-omega").textContent = omega;
+  const p2pDriving = Boolean(latestChassisPidState && latestChassisPidState.enabled);
+  document.getElementById("cmd-vx").textContent = p2pDriving ? latestChassisPidState.cmd_vx : vx;
+  document.getElementById("cmd-vy").textContent = p2pDriving ? latestChassisPidState.cmd_vy : vy;
+  document.getElementById("cmd-omega").textContent = p2pDriving ? latestChassisPidState.cmd_omega : omega;
   document.getElementById("cmd-flywheel").textContent =
     latestShooterPidState && latestShooterPidState.enabled
       ? `${latestShooterPidState.upper_cmd} / ${latestShooterPidState.lower_cmd}`
@@ -1494,6 +1496,9 @@ function updateStatusFromWs(msg) {
   if (msg.conveyor) {
     latestConveyorState = msg.conveyor;
   }
+  if (msg.chassis_pid) {
+    updateChassisPidUI(msg.chassis_pid);
+  }
   if (msg.telemetry) {
     latestTelemetryData = msg.telemetry;
     updateSensorTelemetryUI();
@@ -1527,6 +1532,9 @@ function initStatusPolling() {
         }
         if (data.conveyor) {
           latestConveyorState = data.conveyor;
+        }
+        if (data.chassis_pid) {
+          updateChassisPidUI(data.chassis_pid);
         }
         if (data.latest_telemetry) {
           latestTelemetryData = data.latest_telemetry;
@@ -1686,6 +1694,8 @@ function updateMatchUI(match) {
       statusMsg.textContent = match.status_message || "Robot is disarmed. Enable Tele-Op or Start Auto to begin.";
       break;
   }
+
+  refreshChassisP2pControlsAvailability();
 }
 
 function localMatchTimerTick() {
@@ -1981,7 +1991,151 @@ function initFieldPoseMap() {
     sendSimPose(fSlider.value, lSlider.value, rSlider.value, 0);
   });
 
+  // Chassis P2P Waypoint Test Controls (Practice Mode Only)
+  const p2pXInput = document.getElementById("sim-p2p-x-input");
+  const p2pYInput = document.getElementById("sim-p2p-y-input");
+  const p2pHeadingInput = document.getElementById("sim-p2p-heading-input");
+  const p2pAimGoalToggle = document.getElementById("sim-p2p-aim-goal-toggle");
+  const p2pStopArrivalToggle = document.getElementById("sim-p2p-stop-arrival-toggle");
+  const p2pGotoBtn = document.getElementById("sim-p2p-goto-btn");
+  const p2pCancelBtn = document.getElementById("sim-p2p-cancel-btn");
+  const p2pStatusText = document.getElementById("sim-p2p-status-text");
+
+  if (p2pAimGoalToggle && p2pHeadingInput) {
+    p2pAimGoalToggle.addEventListener("change", () => {
+      p2pHeadingInput.disabled = p2pAimGoalToggle.checked;
+    });
+  }
+
+  if (p2pGotoBtn) {
+    p2pGotoBtn.addEventListener("click", async () => {
+      const aimAtGoal = Boolean(p2pAimGoalToggle && p2pAimGoalToggle.checked);
+      const stopOnArrival = p2pStopArrivalToggle ? Boolean(p2pStopArrivalToggle.checked) : true;
+      const payload = {
+        target_x_cm: Number(p2pXInput ? p2pXInput.value : 200),
+        target_y_cm: Number(p2pYInput ? p2pYInput.value : 250),
+        target_heading_deg: aimAtGoal ? null : Number(p2pHeadingInput ? p2pHeadingInput.value : 0),
+        aim_at_goal: aimAtGoal,
+        stop_on_arrival: stopOnArrival,
+      };
+      try {
+        const res = await fetch("/api/chassis/goto", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          if (p2pStatusText) {
+            p2pStatusText.textContent = data.detail || `Error ${res.status}`;
+          }
+          return;
+        }
+        if (data.chassis_pid) {
+          updateChassisPidUI(data.chassis_pid);
+        }
+      } catch (e) {
+        console.error("Failed to send P2P goto:", e);
+        if (p2pStatusText) {
+          p2pStatusText.textContent = "Request failed";
+        }
+      }
+    });
+  }
+
+  if (p2pCancelBtn) {
+    p2pCancelBtn.addEventListener("click", async () => {
+      try {
+        const res = await fetch("/api/chassis/cancel", { method: "POST" });
+        const data = await res.json();
+        if (res.ok && data.chassis_pid) {
+          updateChassisPidUI(data.chassis_pid);
+        } else if (!res.ok && p2pStatusText) {
+          p2pStatusText.textContent = data.detail || `Error ${res.status}`;
+        }
+      } catch (e) {
+        console.error("Failed to cancel P2P:", e);
+      }
+    });
+  }
+
+  refreshChassisP2pControlsAvailability();
   drawFieldMap(null);
+}
+
+function refreshChassisP2pControlsAvailability() {
+  const gotoBtn = document.getElementById("sim-p2p-goto-btn");
+  const statusText = document.getElementById("sim-p2p-status-text");
+  const isPractice = currentMatchState && currentMatchState.mode === "practice";
+  if (gotoBtn) {
+    gotoBtn.disabled = !isPractice;
+  }
+  if (statusText && (!latestChassisPidState || (!latestChassisPidState.enabled && !latestChassisPidState.at_target))) {
+    statusText.textContent = isPractice
+      ? "Ready (Practice mode active)"
+      : `Locked (${String((currentMatchState && currentMatchState.mode) || "disarmed").toUpperCase()} - requires Practice)`;
+  }
+}
+
+function updateChassisPidUI(state) {
+  if (!state) return;
+  latestChassisPidState = state;
+
+  const chip = document.getElementById("chassis-p2p-chip");
+  const icon = document.getElementById("chassis-p2p-icon");
+  const text = document.getElementById("chassis-p2p-text");
+  const modalStatus = document.getElementById("sim-p2p-status-text");
+
+  const isFaultBlocked =
+    Boolean(state.enabled) &&
+    (state.block_reason === "pose_missing" ||
+      state.block_reason === "pose_invalid" ||
+      state.block_reason === "pose_stale");
+
+  if (chip && icon && text) {
+    chip.classList.remove(
+      "p2p-chip-driving",
+      "p2p-chip-arrived",
+      "p2p-chip-blind",
+      "p2p-chip-blocked"
+    );
+    if (isFaultBlocked) {
+      chip.classList.add("p2p-chip-blocked");
+      icon.textContent = "error";
+      text.textContent = "P2P: Blocked";
+    } else if (state.enabled && state.translation_blind) {
+      chip.classList.add("p2p-chip-blind");
+      icon.textContent = "rotate_right";
+      text.textContent = "P2P: Blind Rot";
+    } else if (state.at_target) {
+      chip.classList.add("p2p-chip-arrived");
+      icon.textContent = "check_circle";
+      text.textContent = "P2P: Arrived";
+    } else if (state.enabled) {
+      chip.classList.add("p2p-chip-driving");
+      icon.textContent = "navigation";
+      text.textContent = "P2P: Driving";
+    } else {
+      icon.textContent = "navigation";
+      text.textContent = "P2P: Idle";
+    }
+  }
+
+  if (modalStatus) {
+    if (isFaultBlocked) {
+      modalStatus.textContent = `Blocked: ${state.block_reason}`;
+    } else if (state.enabled && state.translation_blind) {
+      modalStatus.textContent = `Blind rotation (hdg err ${Number(state.heading_error_deg || 0).toFixed(1)}\u00B0)`;
+    } else if (state.at_target) {
+      modalStatus.textContent = `Arrived at (${Number(state.target_x_cm || 0).toFixed(0)}, ${Number(state.target_y_cm || 0).toFixed(0)})`;
+    } else if (state.enabled) {
+      modalStatus.textContent = `Driving: err=${Number(state.position_error_cm || 0).toFixed(1)}cm, hdg=${Number(state.heading_error_deg || 0).toFixed(1)}\u00B0`;
+    } else {
+      refreshChassisP2pControlsAvailability();
+    }
+  }
+
+  drawFieldMap(currentPoseState);
 }
 
 function updatePoseUI(pose) {
@@ -2188,6 +2342,75 @@ function drawFieldMap(pose) {
     ctx.strokeStyle = "rgba(56, 189, 248, 0.45)";
     ctx.lineWidth = 2;
     ctx.stroke();
+  }
+
+  // 5b. Draw Chassis P2P Target Waypoint Overlay (when active or recently arrived)
+  const p2p = latestChassisPidState;
+  const hasP2pTarget =
+    p2p &&
+    (p2p.enabled || p2p.at_target) &&
+    typeof p2p.target_x_cm === "number" &&
+    typeof p2p.target_y_cm === "number";
+
+  let p2pColor = "#38bdf8";
+  if (hasP2pTarget) {
+    if (
+      p2p.enabled &&
+      (p2p.block_reason === "pose_missing" ||
+        p2p.block_reason === "pose_invalid" ||
+        p2p.block_reason === "pose_stale")
+    ) {
+      p2pColor = "#ff5252";
+    } else if (p2p.enabled && p2p.translation_blind) {
+      p2pColor = "#fbbf24";
+    } else if (p2p.at_target) {
+      p2pColor = "#00e676";
+    }
+
+    const tx = toPxX(p2p.target_x_cm);
+    const ty = toPxY(p2p.target_y_cm);
+    const tolRadiusPx = Math.max(5, (5.0 / FIELD_WIDTH_CM) * fieldW);
+
+    if (pose && typeof pose.x_cm === "number" && typeof pose.y_cm === "number") {
+      ctx.save();
+      ctx.beginPath();
+      ctx.setLineDash([5, 4]);
+      ctx.moveTo(toPxX(pose.x_cm), toPxY(pose.y_cm));
+      ctx.lineTo(tx, ty);
+      ctx.strokeStyle = p2pColor;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    ctx.save();
+    ctx.translate(tx, ty);
+    // Tolerance circle
+    ctx.beginPath();
+    ctx.arc(0, 0, tolRadiusPx, 0, Math.PI * 2);
+    ctx.strokeStyle = p2pColor;
+    ctx.lineWidth = 1.6;
+    ctx.stroke();
+
+    // Crosshair
+    ctx.beginPath();
+    ctx.moveTo(-8, 0);
+    ctx.lineTo(8, 0);
+    ctx.moveTo(0, -8);
+    ctx.lineTo(0, 8);
+    ctx.stroke();
+
+    // Target heading arrow
+    const targetHeadingRad = ((p2p.target_heading_deg || 0) * Math.PI) / 180.0;
+    ctx.rotate(targetHeadingRad);
+    ctx.beginPath();
+    ctx.moveTo(0, -tolRadiusPx - 8);
+    ctx.lineTo(-4, -tolRadiusPx - 1);
+    ctx.lineTo(4, -tolRadiusPx - 1);
+    ctx.closePath();
+    ctx.fillStyle = p2pColor;
+    ctx.fill();
+    ctx.restore();
   }
 
   if (!pose || typeof pose.x_cm !== "number" || typeof pose.y_cm !== "number") {

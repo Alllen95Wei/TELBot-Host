@@ -7,6 +7,9 @@ Implements:
     with distance-based auto-speed calculation, manual override, and open-loop feedforward fallback.
   - ConveyorControlState: Thread-safe state snapshot of conveyor trigger & spinner arbitration.
   - ConveyorController: Automatic spinner anti-jam reverse when shooter is running with no ball detected.
+  - ChassisControlState: Thread-safe telemetry snapshot of the 3-DOF chassis Pose-to-Point PID controller.
+  - ChassisPoseController: Closed-loop 3-DOF field pose controller with vector speed cap,
+    field-to-body rotation, blind-LiDAR rotation policy, and dwell settle check.
 """
 
 from __future__ import annotations
@@ -23,14 +26,16 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from config import ChassisPID as ChassisPIDConfig
 from config import ConveyorAutoReverse as ConveyorAutoReverseConfig
 from config import ESP32 as ESP32Config
+from config import Field as FieldConfig
 from config import ShooterPID as ShooterPIDConfig
 from config import SpecialGrid as SpecialGridConfig
 from core.comms import UARTComm
 from core.esp32 import ESP32SensorReceiver, ESP32SensorSnapshot
 from core.match import MatchManager, MatchMode
-from core.pid import PIDConfig, PIDController
+from core.pid import PIDConfig, PIDController, wrap_angle_deg
 from core.pose import PoseEstimate, PoseEstimator
 from core.vision import VisionManager, VisionTarget
 
@@ -814,6 +819,738 @@ def step_conveyor_control(
     return last_sent_spinner
 
 
+def _build_chassis_pos_pid_config(
+    kp: float,
+    ki: float,
+    kd: float,
+    error_tolerance: float,
+) -> PIDConfig:
+    """Builds a field-position PIDConfig (no feedforward, no zero-setpoint reset)."""
+    return PIDConfig(
+        kp=float(kp),
+        ki=float(ki),
+        kd=float(kd),
+        kv=0.0,
+        ks=0.0,
+        out_min=-1000.0,
+        out_max=1000.0,
+        i_zone=float(ChassisPIDConfig.POS_I_ZONE_CM),
+        max_integral=float(ChassisPIDConfig.POS_MAX_INTEGRAL),
+        angle_wrap=False,
+        zero_on_zero_setpoint=False,
+        d_filter_alpha=float(ChassisPIDConfig.D_FILTER_ALPHA),
+        error_tolerance=float(error_tolerance),
+        max_dt=0.5,
+    )
+
+
+def _build_chassis_heading_pid_config(
+    kp: float,
+    ki: float,
+    kd: float,
+    error_tolerance: float,
+) -> PIDConfig:
+    """Builds a field-heading PIDConfig with continuous angle wrap and no zero-setpoint reset."""
+    return PIDConfig(
+        kp=float(kp),
+        ki=float(ki),
+        kd=float(kd),
+        kv=0.0,
+        ks=0.0,
+        out_min=-1000.0,
+        out_max=1000.0,
+        i_zone=float(ChassisPIDConfig.HEADING_I_ZONE_DEG),
+        max_integral=float(ChassisPIDConfig.HEADING_MAX_INTEGRAL),
+        angle_wrap=True,
+        zero_on_zero_setpoint=False,
+        d_filter_alpha=float(ChassisPIDConfig.D_FILTER_ALPHA),
+        error_tolerance=float(error_tolerance),
+        max_dt=0.5,
+    )
+
+
+@dataclass
+class ChassisControlState:
+    """Snapshot of 3-DOF chassis Pose-to-Point (P2P) PID target, pose, errors, and velocity commands."""
+
+    enabled: bool = False
+    at_target: bool = False
+    at_target_instant: bool = False
+    stop_on_arrival: bool = True
+    pose_valid: bool = False
+    pose_stale: bool = False
+    translation_blind: bool = False
+    block_reason: Optional[str] = "disabled"
+    target_x_cm: Optional[float] = None
+    target_y_cm: Optional[float] = None
+    target_heading_deg: Optional[float] = None
+    current_x_cm: Optional[float] = None
+    current_y_cm: Optional[float] = None
+    current_heading_deg: Optional[float] = None
+    error_x_cm: float = 0.0
+    error_y_cm: float = 0.0
+    position_error_cm: float = 0.0
+    heading_error_deg: float = 0.0
+    field_ux: float = 0.0
+    field_uy: float = 0.0
+    cmd_vx: int = 0
+    cmd_vy: int = 0
+    cmd_omega: int = 0
+    settle_elapsed_s: float = 0.0
+    x_pid: dict = field(default_factory=dict)
+    y_pid: dict = field(default_factory=dict)
+    heading_pid: dict = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+class ChassisPoseController:
+    """
+    Closed-loop 3-DOF holonomic Pose-to-Point (P2P) controller for the Mecanum chassis.
+
+    Drives field coordinates (x_cm, y_cm, heading_deg) to a target pose using three
+    decoupled PID loops, a direction-preserving linear speed cap, field-to-body frame
+    rotation, blind-LiDAR rotation fallback, and dwell-based arrival settling.
+    """
+
+    def __init__(
+        self,
+        x_config: Optional[PIDConfig] = None,
+        y_config: Optional[PIDConfig] = None,
+        heading_config: Optional[PIDConfig] = None,
+        max_linear_speed: float = ChassisPIDConfig.MAX_LINEAR_SPEED,
+        max_angular_speed: float = ChassisPIDConfig.MAX_ANGULAR_SPEED,
+        min_linear_cmd: float = ChassisPIDConfig.MIN_LINEAR_CMD,
+        min_angular_cmd: float = ChassisPIDConfig.MIN_ANGULAR_CMD,
+        pos_tolerance_cm: float = ChassisPIDConfig.POS_TOLERANCE_CM,
+        heading_tolerance_deg: float = ChassisPIDConfig.HEADING_TOLERANCE_DEG,
+        settle_time_s: float = ChassisPIDConfig.SETTLE_TIME_S,
+        pose_stale_timeout_s: float = ChassisPIDConfig.POSE_STALE_TIMEOUT_S,
+        max_blind_hold_s: float = ChassisPIDConfig.MAX_BLIND_HOLD_S,
+        wall_margin_cm: float = ChassisPIDConfig.WALL_MARGIN_CM,
+        field_width_cm: float = FieldConfig.WIDTH_CM,
+        field_length_cm: float = FieldConfig.LENGTH_CM,
+    ) -> None:
+        self._lock = threading.RLock()
+
+        self._field_width_cm = float(field_width_cm)
+        self._field_length_cm = float(field_length_cm)
+        self._max_linear_speed = float(max_linear_speed)
+        self._max_angular_speed = float(max_angular_speed)
+        self._min_linear_cmd = float(min_linear_cmd)
+        self._min_angular_cmd = float(min_angular_cmd)
+        self._pos_tolerance_cm = float(pos_tolerance_cm)
+        self._heading_tolerance_deg = float(heading_tolerance_deg)
+        self._settle_time_s = float(settle_time_s)
+        self._pose_stale_timeout_s = float(pose_stale_timeout_s)
+        self._max_blind_hold_s = float(max_blind_hold_s)
+        self._wall_margin_cm = float(wall_margin_cm)
+
+        x_cfg = x_config or _build_chassis_pos_pid_config(
+            kp=ChassisPIDConfig.X_KP,
+            ki=ChassisPIDConfig.X_KI,
+            kd=ChassisPIDConfig.X_KD,
+            error_tolerance=self._pos_tolerance_cm,
+        )
+        y_cfg = y_config or _build_chassis_pos_pid_config(
+            kp=ChassisPIDConfig.Y_KP,
+            ki=ChassisPIDConfig.Y_KI,
+            kd=ChassisPIDConfig.Y_KD,
+            error_tolerance=self._pos_tolerance_cm,
+        )
+        h_cfg = heading_config or _build_chassis_heading_pid_config(
+            kp=ChassisPIDConfig.HEADING_KP,
+            ki=ChassisPIDConfig.HEADING_KI,
+            kd=ChassisPIDConfig.HEADING_KD,
+            error_tolerance=self._heading_tolerance_deg,
+        )
+
+        # Enforce critical position-PID safeguards even on custom configs
+        for cfg, wrap in ((x_cfg, False), (y_cfg, False), (h_cfg, True)):
+            cfg.kv = 0.0
+            cfg.ks = 0.0
+            cfg.zero_on_zero_setpoint = False
+            cfg.angle_wrap = wrap
+
+        self.x_pid = PIDController(config=x_cfg)
+        self.y_pid = PIDController(config=y_cfg)
+        self.heading_pid = PIDController(config=h_cfg)
+
+        self._enabled: bool = False
+        self._stop_on_arrival: bool = True
+        self._at_target: bool = False
+        self._target_x_cm: Optional[float] = None
+        self._target_y_cm: Optional[float] = None
+        self._target_heading_deg: Optional[float] = None
+        self._settle_start_time: Optional[float] = None
+        self._blind_start_time: Optional[float] = None
+
+        self._state = ChassisControlState(
+            x_pid=self.x_pid.state.to_dict(),
+            y_pid=self.y_pid.state.to_dict(),
+            heading_pid=self.heading_pid.state.to_dict(),
+        )
+
+    @property
+    def enabled(self) -> bool:
+        with self._lock:
+            return self._enabled
+
+    @property
+    def state(self) -> ChassisControlState:
+        with self._lock:
+            return ChassisControlState(**self._state.to_dict())
+
+    def is_at_target(self) -> bool:
+        with self._lock:
+            return self._at_target
+
+    def _clamp_target_xy(self, x_cm: float, y_cm: float) -> tuple[float, float]:
+        min_x = self._wall_margin_cm
+        max_x = max(min_x, self._field_width_cm - self._wall_margin_cm)
+        min_y = self._wall_margin_cm
+        max_y = max(min_y, self._field_length_cm - self._wall_margin_cm)
+        return (
+            max(min_x, min(max_x, float(x_cm))),
+            max(min_y, min(max_y, float(y_cm))),
+        )
+
+    def _reset_pids_locked(self) -> None:
+        self.x_pid.reset()
+        self.y_pid.reset()
+        self.heading_pid.reset()
+        self._settle_start_time = None
+        self._blind_start_time = None
+
+    def set_target(
+        self,
+        target_x_cm: float,
+        target_y_cm: float,
+        target_heading_deg: float,
+        *,
+        enable: bool = True,
+        stop_on_arrival: bool = True,
+    ) -> None:
+        """Sets target field pose (clamped inside field walls) and optionally enables P2P."""
+        vals = (target_x_cm, target_y_cm, target_heading_deg)
+        if not all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(float(v)) for v in vals):
+            raise ValueError(
+                f"Target coordinates and heading must be finite numbers, got {vals!r}"
+            )
+
+        with self._lock:
+            clamped_x, clamped_y = self._clamp_target_xy(
+                float(target_x_cm), float(target_y_cm)
+            )
+            norm_heading = float(target_heading_deg) % 360.0
+
+            self._reset_pids_locked()
+            self._at_target = False
+            self._target_x_cm = round(clamped_x, 2)
+            self._target_y_cm = round(clamped_y, 2)
+            self._target_heading_deg = round(norm_heading, 2)
+            self._stop_on_arrival = bool(stop_on_arrival)
+            self._enabled = bool(enable)
+
+            self._state.enabled = self._enabled
+            self._state.stop_on_arrival = self._stop_on_arrival
+            self._state.at_target = False
+            self._state.at_target_instant = False
+            self._state.translation_blind = False
+            self._state.target_x_cm = self._target_x_cm
+            self._state.target_y_cm = self._target_y_cm
+            self._state.target_heading_deg = self._target_heading_deg
+            self._state.field_ux = 0.0
+            self._state.field_uy = 0.0
+            self._state.cmd_vx = 0
+            self._state.cmd_vy = 0
+            self._state.cmd_omega = 0
+            self._state.settle_elapsed_s = 0.0
+            self._state.block_reason = None if self._enabled else "disabled"
+            self._state.x_pid = self.x_pid.state.to_dict()
+            self._state.y_pid = self.y_pid.state.to_dict()
+            self._state.heading_pid = self.heading_pid.state.to_dict()
+
+    def set_target_aim_at_goal(
+        self,
+        target_x_cm: float,
+        target_y_cm: float,
+        goal_x_cm: float,
+        goal_y_cm: float,
+        *,
+        enable: bool = True,
+        stop_on_arrival: bool = True,
+    ) -> float:
+        """
+        Sets target (x, y) clamped inside field walls and computes heading to face
+        (goal_x_cm, goal_y_cm) from that waypoint. Returns the computed heading (deg).
+        """
+        vals = (target_x_cm, target_y_cm, goal_x_cm, goal_y_cm)
+        if not all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(float(v)) for v in vals):
+            raise ValueError(
+                f"Waypoint and goal coordinates must be finite numbers, got {vals!r}"
+            )
+
+        with self._lock:
+            clamped_x, clamped_y = self._clamp_target_xy(
+                float(target_x_cm), float(target_y_cm)
+            )
+            dx = float(goal_x_cm) - clamped_x
+            dy = float(goal_y_cm) - clamped_y
+            aim_heading_deg = math.degrees(math.atan2(dx, dy)) % 360.0
+            self.set_target(
+                clamped_x,
+                clamped_y,
+                aim_heading_deg,
+                enable=enable,
+                stop_on_arrival=stop_on_arrival,
+            )
+            return round(aim_heading_deg, 2)
+
+    def set_enabled(self, enabled: bool) -> None:
+        flag = bool(enabled)
+        with self._lock:
+            self._enabled = flag
+            self._state.enabled = flag
+            if not flag:
+                self._reset_pids_locked()
+                self._at_target = False
+                self._state.at_target = False
+                self._state.at_target_instant = False
+                self._state.translation_blind = False
+                self._state.field_ux = 0.0
+                self._state.field_uy = 0.0
+                self._state.cmd_vx = 0
+                self._state.cmd_vy = 0
+                self._state.cmd_omega = 0
+                self._state.settle_elapsed_s = 0.0
+                self._state.block_reason = "disabled"
+                self._state.x_pid = self.x_pid.state.to_dict()
+                self._state.y_pid = self.y_pid.state.to_dict()
+                self._state.heading_pid = self.heading_pid.state.to_dict()
+            else:
+                self._state.block_reason = None
+
+    def reset(self) -> None:
+        """Resets all 3 PIDs, settle/blind timers, and zeroes live command outputs."""
+        with self._lock:
+            self._reset_pids_locked()
+            self._at_target = False
+            self._state.at_target = False
+            self._state.at_target_instant = False
+            self._state.translation_blind = False
+            self._state.field_ux = 0.0
+            self._state.field_uy = 0.0
+            self._state.cmd_vx = 0
+            self._state.cmd_vy = 0
+            self._state.cmd_omega = 0
+            self._state.settle_elapsed_s = 0.0
+            self._state.x_pid = self.x_pid.state.to_dict()
+            self._state.y_pid = self.y_pid.state.to_dict()
+            self._state.heading_pid = self.heading_pid.state.to_dict()
+
+    def stop(self) -> tuple[int, int, int]:
+        """Disables P2P control, resets PIDs/timers, clears commands, and returns (0, 0, 0)."""
+        with self._lock:
+            self._enabled = False
+            self.reset()
+            self._state.enabled = False
+            self._state.block_reason = "disabled"
+            return (0, 0, 0)
+
+    def set_gains(
+        self,
+        axis: str = "all",
+        kp: Optional[float] = None,
+        ki: Optional[float] = None,
+        kd: Optional[float] = None,
+    ) -> None:
+        """Updates PID gains on 'x', 'y', 'xy', 'heading', or 'all' axes (keeping kv=ks=0)."""
+        target_axis = str(axis).lower().strip()
+        if target_axis not in ("x", "y", "xy", "heading", "all"):
+            raise ValueError(
+                f"axis must be 'x', 'y', 'xy', 'heading', or 'all', got {axis!r}"
+            )
+        for name, val in (("kp", kp), ("ki", ki), ("kd", kd)):
+            if val is not None:
+                fval = float(val)
+                if not math.isfinite(fval) or fval < 0.0:
+                    raise ValueError(f"{name} must be finite and >= 0.0, got {val!r}")
+
+        with self._lock:
+            if target_axis in ("x", "xy", "all"):
+                self.x_pid.set_gains(kp=kp, ki=ki, kd=kd, kv=0.0, ks=0.0)
+            if target_axis in ("y", "xy", "all"):
+                self.y_pid.set_gains(kp=kp, ki=ki, kd=kd, kv=0.0, ks=0.0)
+            if target_axis in ("heading", "all"):
+                self.heading_pid.set_gains(kp=kp, ki=ki, kd=kd, kv=0.0, ks=0.0)
+
+    def set_config(
+        self,
+        max_linear_speed: Optional[float] = None,
+        max_angular_speed: Optional[float] = None,
+        min_linear_cmd: Optional[float] = None,
+        min_angular_cmd: Optional[float] = None,
+        pos_tolerance_cm: Optional[float] = None,
+        heading_tolerance_deg: Optional[float] = None,
+        settle_time_s: Optional[float] = None,
+        pose_stale_timeout_s: Optional[float] = None,
+        max_blind_hold_s: Optional[float] = None,
+        wall_margin_cm: Optional[float] = None,
+    ) -> None:
+        """Updates chassis P2P speed caps, stiction floors, tolerances, and timeouts."""
+        checks = (
+            ("max_linear_speed", max_linear_speed, 0.0, 1000.0),
+            ("max_angular_speed", max_angular_speed, 0.0, 1000.0),
+            ("min_linear_cmd", min_linear_cmd, 0.0, 1000.0),
+            ("min_angular_cmd", min_angular_cmd, 0.0, 1000.0),
+            ("pos_tolerance_cm", pos_tolerance_cm, 0.0, 1000.0),
+            ("heading_tolerance_deg", heading_tolerance_deg, 0.0, 180.0),
+            ("settle_time_s", settle_time_s, 0.0, 60.0),
+            ("pose_stale_timeout_s", pose_stale_timeout_s, 0.01, 60.0),
+            ("max_blind_hold_s", max_blind_hold_s, 0.0, 60.0),
+            ("wall_margin_cm", wall_margin_cm, 0.0, 200.0),
+        )
+        for name, val, lo, hi in checks:
+            if val is not None:
+                fval = float(val)
+                if not math.isfinite(fval) or fval < lo or fval > hi:
+                    raise ValueError(f"{name} must be in [{lo}, {hi}], got {val!r}")
+
+        with self._lock:
+            if wall_margin_cm is not None:
+                wm = float(wall_margin_cm)
+                if wm * 2.0 >= min(self._field_width_cm, self._field_length_cm):
+                    raise ValueError(
+                        f"wall_margin_cm ({wm}) is too large for field dimensions"
+                    )
+                self._wall_margin_cm = wm
+
+            if max_linear_speed is not None:
+                self._max_linear_speed = float(max_linear_speed)
+            if max_angular_speed is not None:
+                self._max_angular_speed = float(max_angular_speed)
+            if min_linear_cmd is not None:
+                self._min_linear_cmd = float(min_linear_cmd)
+            if min_angular_cmd is not None:
+                self._min_angular_cmd = float(min_angular_cmd)
+            if pos_tolerance_cm is not None:
+                self._pos_tolerance_cm = float(pos_tolerance_cm)
+                self.x_pid.config.error_tolerance = self._pos_tolerance_cm
+                self.y_pid.config.error_tolerance = self._pos_tolerance_cm
+            if heading_tolerance_deg is not None:
+                self._heading_tolerance_deg = float(heading_tolerance_deg)
+                self.heading_pid.config.error_tolerance = self._heading_tolerance_deg
+            if settle_time_s is not None:
+                self._settle_time_s = float(settle_time_s)
+            if pose_stale_timeout_s is not None:
+                self._pose_stale_timeout_s = float(pose_stale_timeout_s)
+            if max_blind_hold_s is not None:
+                self._max_blind_hold_s = float(max_blind_hold_s)
+
+    def get_gains(self) -> dict:
+        with self._lock:
+            return {
+                "x": self.x_pid.config.to_dict(),
+                "y": self.y_pid.config.to_dict(),
+                "heading": self.heading_pid.config.to_dict(),
+            }
+
+    def get_config(self) -> dict:
+        with self._lock:
+            return {
+                "max_linear_speed": self._max_linear_speed,
+                "max_angular_speed": self._max_angular_speed,
+                "min_linear_cmd": self._min_linear_cmd,
+                "min_angular_cmd": self._min_angular_cmd,
+                "pos_tolerance_cm": self._pos_tolerance_cm,
+                "heading_tolerance_deg": self._heading_tolerance_deg,
+                "settle_time_s": self._settle_time_s,
+                "pose_stale_timeout_s": self._pose_stale_timeout_s,
+                "max_blind_hold_s": self._max_blind_hold_s,
+                "wall_margin_cm": self._wall_margin_cm,
+                "field_width_cm": self._field_width_cm,
+                "field_length_cm": self._field_length_cm,
+            }
+
+    def get_status(self) -> dict:
+        with self._lock:
+            return self._state.to_dict()
+
+    def _zero_on_pose_fault_locked(
+        self,
+        block_reason: str,
+        pose_valid: bool,
+        pose_stale: bool,
+        curr_x: Optional[float] = None,
+        curr_y: Optional[float] = None,
+        curr_h: Optional[float] = None,
+    ) -> tuple[int, int, int]:
+        self._reset_pids_locked()
+        self._at_target = False
+        self._state = ChassisControlState(
+            enabled=self._enabled,
+            at_target=False,
+            at_target_instant=False,
+            stop_on_arrival=self._stop_on_arrival,
+            pose_valid=pose_valid,
+            pose_stale=pose_stale,
+            translation_blind=False,
+            block_reason=block_reason,
+            target_x_cm=self._target_x_cm,
+            target_y_cm=self._target_y_cm,
+            target_heading_deg=self._target_heading_deg,
+            current_x_cm=curr_x,
+            current_y_cm=curr_y,
+            current_heading_deg=curr_h,
+            x_pid=self.x_pid.state.to_dict(),
+            y_pid=self.y_pid.state.to_dict(),
+            heading_pid=self.heading_pid.state.to_dict(),
+        )
+        return (0, 0, 0)
+
+    def update(
+        self,
+        pose: Optional[PoseEstimate],
+        dt: Optional[float] = None,
+        now: Optional[float] = None,
+    ) -> tuple[int, int, int]:
+        """
+        Computes body-frame Mecanum drive velocities (vx, vy, omega) in [-1000, +1000]
+        from the current field pose estimate and target pose.
+        """
+        t = time.monotonic() if now is None else float(now)
+
+        with self._lock:
+            if (
+                not self._enabled
+                or self._target_x_cm is None
+                or self._target_y_cm is None
+                or self._target_heading_deg is None
+            ):
+                self._reset_pids_locked()
+                preserved_arrived = (
+                    not self._enabled
+                    and self._at_target
+                    and self._state.block_reason == "arrived"
+                )
+                self._state.enabled = False
+                self._state.at_target_instant = False
+                self._state.translation_blind = False
+                self._state.field_ux = 0.0
+                self._state.field_uy = 0.0
+                self._state.cmd_vx = 0
+                self._state.cmd_vy = 0
+                self._state.cmd_omega = 0
+                self._state.block_reason = "arrived" if preserved_arrived else "disabled"
+                self._state.x_pid = self.x_pid.state.to_dict()
+                self._state.y_pid = self.y_pid.state.to_dict()
+                self._state.heading_pid = self.heading_pid.state.to_dict()
+                return (0, 0, 0)
+
+            if pose is None:
+                return self._zero_on_pose_fault_locked(
+                    block_reason="pose_missing",
+                    pose_valid=False,
+                    pose_stale=False,
+                )
+
+            pose_time = getattr(pose, "monotonic_time", None)
+            pose_age_s = (
+                (t - float(pose_time)) if pose_time is not None else 0.0
+            )
+            pose_stale = pose_age_s > self._pose_stale_timeout_s
+
+            if not pose.valid or pose.x_cm is None or pose.y_cm is None:
+                return self._zero_on_pose_fault_locked(
+                    block_reason="pose_invalid",
+                    pose_valid=False,
+                    pose_stale=pose_stale,
+                    curr_h=round(float(pose.heading_deg) % 360.0, 2),
+                )
+
+            curr_x = float(pose.x_cm)
+            curr_y = float(pose.y_cm)
+            curr_h = float(pose.heading_deg) % 360.0
+
+            if pose_stale:
+                return self._zero_on_pose_fault_locked(
+                    block_reason="pose_stale",
+                    pose_valid=True,
+                    pose_stale=True,
+                    curr_x=round(curr_x, 2),
+                    curr_y=round(curr_y, 2),
+                    curr_h=round(curr_h, 2),
+                )
+
+            # 4. Blind-LiDAR rotation policy
+            lr_blind = pose.lr_status in (
+                "no_valid_beam",
+                "right_rejected_delta",
+                "left_rejected_delta",
+            )
+            front_blind = pose.front_status in ("no_valid_beam", "rejected_delta")
+            if lr_blind or front_blind:
+                if self._blind_start_time is None:
+                    self._blind_start_time = t
+                translation_blind = (
+                    (t - self._blind_start_time) >= self._max_blind_hold_s
+                )
+            else:
+                self._blind_start_time = None
+                translation_blind = False
+
+            # 5. Field errors
+            err_x = self._target_x_cm - curr_x
+            err_y = self._target_y_cm - curr_y
+            dist_err = math.hypot(err_x, err_y)
+            err_heading = wrap_angle_deg(self._target_heading_deg - curr_h)
+
+            # 6. Heading PID (runs even when translation is blind so robot can rotate off diagonals)
+            if abs(err_heading) <= self._heading_tolerance_deg:
+                self.heading_pid.reset()
+                omega_f = 0.0
+            else:
+                omega_f = self.heading_pid.update(
+                    self._target_heading_deg, curr_h, dt=dt, now=t
+                )
+                omega_f = max(
+                    -self._max_angular_speed, min(self._max_angular_speed, omega_f)
+                )
+                if 0.0 < abs(omega_f) < self._min_angular_cmd:
+                    omega_f = math.copysign(self._min_angular_cmd, omega_f)
+
+            # 7. Translation PIDs (paused when translation_blind or inside position tolerance)
+            if translation_blind or dist_err <= self._pos_tolerance_cm:
+                self.x_pid.reset()
+                self.y_pid.reset()
+                ux = 0.0
+                uy = 0.0
+            else:
+                ux = self.x_pid.update(self._target_x_cm, curr_x, dt=dt, now=t)
+                uy = self.y_pid.update(self._target_y_cm, curr_y, dt=dt, now=t)
+                mag = math.hypot(ux, uy)
+                if mag > self._max_linear_speed and mag > 1e-9:
+                    scale = self._max_linear_speed / mag
+                    ux *= scale
+                    uy *= scale
+                    mag = self._max_linear_speed
+                if 0.0 < mag < self._min_linear_cmd and mag > 1e-9:
+                    scale = self._min_linear_cmd / mag
+                    ux *= scale
+                    uy *= scale
+
+            # 8. Field-to-body rotation: +vx forward along heading, +vy strafe right
+            theta_rad = math.radians(curr_h)
+            vx_f = uy * math.cos(theta_rad) + ux * math.sin(theta_rad)
+            vy_f = ux * math.cos(theta_rad) - uy * math.sin(theta_rad)
+
+            cmd_vx = max(-1000, min(1000, int(round(vx_f))))
+            cmd_vy = max(-1000, min(1000, int(round(vy_f))))
+            cmd_omega = max(-1000, min(1000, int(round(omega_f))))
+
+            # 9. Dwell-based arrival settling check
+            instant_ok = (
+                (not translation_blind)
+                and (dist_err <= self._pos_tolerance_cm)
+                and (abs(err_heading) <= self._heading_tolerance_deg)
+            )
+            if instant_ok:
+                if self._settle_start_time is None:
+                    self._settle_start_time = t
+                settle_elapsed = max(0.0, t - self._settle_start_time)
+                self._at_target = settle_elapsed >= self._settle_time_s
+            else:
+                self._settle_start_time = None
+                settle_elapsed = 0.0
+                self._at_target = False
+
+            # 10. stop_on_arrival handling
+            if self._at_target and self._stop_on_arrival:
+                self._enabled = False
+                self._reset_pids_locked()
+                ux = 0.0
+                uy = 0.0
+                cmd_vx = 0
+                cmd_vy = 0
+                cmd_omega = 0
+                block_reason: Optional[str] = "arrived"
+            elif self._at_target:
+                block_reason = "arrived"
+            elif translation_blind:
+                block_reason = "translation_blind"
+            else:
+                block_reason = None
+
+            self._state = ChassisControlState(
+                enabled=self._enabled,
+                at_target=self._at_target,
+                at_target_instant=instant_ok,
+                stop_on_arrival=self._stop_on_arrival,
+                pose_valid=True,
+                pose_stale=False,
+                translation_blind=translation_blind,
+                block_reason=block_reason,
+                target_x_cm=self._target_x_cm,
+                target_y_cm=self._target_y_cm,
+                target_heading_deg=self._target_heading_deg,
+                current_x_cm=round(curr_x, 2),
+                current_y_cm=round(curr_y, 2),
+                current_heading_deg=round(curr_h, 2),
+                error_x_cm=round(err_x, 2),
+                error_y_cm=round(err_y, 2),
+                position_error_cm=round(dist_err, 2),
+                heading_error_deg=round(err_heading, 2),
+                field_ux=round(ux, 2),
+                field_uy=round(uy, 2),
+                cmd_vx=cmd_vx,
+                cmd_vy=cmd_vy,
+                cmd_omega=cmd_omega,
+                settle_elapsed_s=round(settle_elapsed, 3),
+                x_pid=self.x_pid.state.to_dict(),
+                y_pid=self.y_pid.state.to_dict(),
+                heading_pid=self.heading_pid.state.to_dict(),
+            )
+            return (cmd_vx, cmd_vy, cmd_omega)
+
+
+def step_chassis_control(
+    controller: ChassisPoseController,
+    uart: UARTComm,
+    match_manager: MatchManager,
+    pose_estimator: PoseEstimator,
+    last_sent_drive: tuple[int, int, int],
+    now: Optional[float] = None,
+) -> tuple[int, int, int]:
+    """
+    Executes one 50 Hz chassis P2P PID control tick with E-Stop and match phase gating.
+    Active only in MatchMode.AUTO and MatchMode.PRACTICE.
+    Returns the updated (vx, vy, omega) last-sent tuple.
+    """
+    if uart.estop_active or match_manager.mode not in (
+        MatchMode.AUTO,
+        MatchMode.PRACTICE,
+    ):
+        if controller.enabled or last_sent_drive != (0, 0, 0):
+            controller.stop()
+            if not uart.estop_active:
+                uart.send_drive(0, 0, 0)
+        return (0, 0, 0)
+
+    if not controller.enabled:
+        if last_sent_drive != (0, 0, 0):
+            uart.send_drive(0, 0, 0)
+        return (0, 0, 0)
+
+    vx, vy, omega = controller.update(
+        pose=pose_estimator.latest_pose,
+        now=now,
+    )
+    uart.send_drive(vx=vx, vy=vy, omega=omega)
+    return (vx, vy, omega)
+
+
 # ==============================================================================
 # Unit Verification
 # ==============================================================================
@@ -934,7 +1671,7 @@ if __name__ == "__main__":
         timestamp=time.time(),
     )
     ctrl.update(pose=pose_center)
-    assert abs(ctrl.state.distance_cm - 200.0) < 0.1
+    assert isinstance(ctrl.state.distance_cm, float) and abs(ctrl.state.distance_cm - 200.0) < 0.1
     assert abs(ctrl.state.target_rpm - 3450.0) < 1e-6
 
     vision_left = VisionTarget(
@@ -1103,3 +1840,193 @@ if __name__ == "__main__":
         assert conv_ctrl.is_active is False
 
     print("All ConveyorController tests PASSED!")
+
+    print("Testing ChassisPoseController...")
+
+    def _make_pose(
+        x_cm: Optional[float] = 200.0,
+        y_cm: Optional[float] = 200.0,
+        heading_deg: float = 0.0,
+        lr_status: str = "both_valid",
+        front_status: str = "valid",
+        valid: bool = True,
+        monotonic_time: Optional[float] = None,
+    ) -> PoseEstimate:
+        return PoseEstimate(
+            x_cm=x_cm,
+            y_cm=y_cm,
+            heading_deg=heading_deg,
+            raw_heading_deg=heading_deg,
+            dist_front_cm=300.0,
+            dist_left_cm=200.0,
+            dist_right_cm=200.0,
+            last_valid_left_cm=200.0,
+            last_valid_right_cm=200.0,
+            last_valid_front_cm=300.0,
+            lr_status=lr_status,
+            front_status=front_status,
+            valid=valid,
+            timestamp=time.time(),
+            monotonic_time=(time.monotonic() if monotonic_time is None else monotonic_time),
+        )
+
+    chassis = ChassisPoseController()
+
+    # 1. Field-to-body transform sign checks at 0, 45, 90, 180, 270 deg
+    # Pure +Y error (robot at y=200, target at y=250, x=200) -> field u_y > 0, u_x = 0
+    for h_deg, exp_vx_sign, exp_vy_sign in (
+        (0.0, +1, 0),
+        (45.0, +1, -1),
+        (90.0, 0, -1),
+        (180.0, -1, 0),
+        (270.0, 0, +1),
+    ):
+        chassis.set_target(200.0, 250.0, h_deg)
+        vx, vy, omega = chassis.update(_make_pose(200.0, 200.0, h_deg, monotonic_time=10.0), dt=0.02, now=10.0)
+        assert omega == 0
+        assert (1 if vx > 0 else (-1 if vx < 0 else 0)) == exp_vx_sign, (h_deg, vx, vy)
+        assert (1 if vy > 0 else (-1 if vy < 0 else 0)) == exp_vy_sign, (h_deg, vx, vy)
+
+    # Pure +X error at 0 deg -> strafe right (+vy)
+    chassis.set_target(250.0, 200.0, 0.0)
+    vx, vy, omega = chassis.update(_make_pose(200.0, 200.0, 0.0, monotonic_time=10.0), dt=0.02, now=10.0)
+    assert vx == 0 and vy > 0 and omega == 0
+
+    # 2. Angle wrap & zero-heading test (350 -> 10 => +omega; 10 -> 350 => -omega; 350 -> 0 => +omega)
+    chassis.set_target(200.0, 200.0, 10.0)
+    _, _, w_pos = chassis.update(_make_pose(200.0, 200.0, 350.0, monotonic_time=10.0), dt=0.02, now=10.0)
+    assert w_pos > 0
+
+    chassis.set_target(200.0, 200.0, 350.0)
+    _, _, w_neg = chassis.update(_make_pose(200.0, 200.0, 10.0, monotonic_time=10.0), dt=0.02, now=10.0)
+    assert w_neg < 0
+
+    chassis.set_target(200.0, 200.0, 0.0)
+    _, _, w_zero_target = chassis.update(_make_pose(200.0, 200.0, 340.0, monotonic_time=10.0), dt=0.02, now=10.0)
+    assert w_zero_target > 0
+
+    # 3. Direction-preserving vector speed cap (err_x=60, err_y=80 -> ux=480, uy=640, ||u||=800 > 600)
+    chassis.set_target(110.0, 130.0, 0.0)
+    vx_cap, vy_cap, _ = chassis.update(_make_pose(50.0, 50.0, 0.0, monotonic_time=10.0), dt=0.02, now=10.0)
+    assert abs(vx_cap) <= int(chassis.get_config()["max_linear_speed"])
+    assert abs(vy_cap) <= int(chassis.get_config()["max_linear_speed"])
+    assert math.hypot(vx_cap, vy_cap) <= chassis.get_config()["max_linear_speed"] + 2.0
+    # Ratio vy/vx should match err_x/err_y = 60/80 = 0.75
+    assert abs((vy_cap / vx_cap) - (60.0 / 80.0)) < 0.03
+
+    # 4. Target clamping inside wall margins
+    chassis.set_target(-10.0, 520.0, 45.0)
+    st_clamp = chassis.state
+    assert st_clamp.target_x_cm == ChassisPIDConfig.WALL_MARGIN_CM
+    assert st_clamp.target_y_cm == FieldConfig.LENGTH_CM - ChassisPIDConfig.WALL_MARGIN_CM
+
+    # Aim-at-goal heading helper check
+    aim_deg = chassis.set_target_aim_at_goal(200.0, 300.0, 200.0, 500.0)
+    assert abs(aim_deg - 0.0) < 1e-6
+
+    # 5. Pose missing / invalid / stale safety
+    chassis.set_target(250.0, 300.0, 0.0)
+    assert chassis.update(None, dt=0.02, now=20.0) == (0, 0, 0)
+    assert chassis.state.block_reason == "pose_missing"
+    assert chassis.update(_make_pose(None, None, 0.0, valid=False, monotonic_time=20.0), dt=0.02, now=20.0) == (0, 0, 0)
+    assert chassis.state.block_reason == "pose_invalid"
+    assert chassis.update(_make_pose(200.0, 200.0, 0.0, monotonic_time=10.0), dt=0.02, now=20.0) == (0, 0, 0)
+    assert chassis.state.block_reason == "pose_stale"
+    assert chassis.x_pid.integral == 0.0 and chassis.y_pid.integral == 0.0 and chassis.heading_pid.integral == 0.0
+
+    # 6. Blind-LiDAR diagonal rotation policy
+    chassis.set_target(300.0, 350.0, 0.0)
+    vx_b1, vy_b1, w_b1 = chassis.update(
+        _make_pose(200.0, 200.0, 45.0, lr_status="no_valid_beam", monotonic_time=30.0),
+        dt=0.02,
+        now=30.0,
+    )
+    assert (vx_b1 != 0 or vy_b1 != 0) and w_b1 != 0 and chassis.state.translation_blind is False
+    vx_b2, vy_b2, w_b2 = chassis.update(
+        _make_pose(200.0, 200.0, 45.0, lr_status="no_valid_beam", monotonic_time=30.3),
+        dt=0.02,
+        now=30.3,
+    )
+    assert vx_b2 == 0 and vy_b2 == 0 and w_b2 != 0
+    assert chassis.state.translation_blind is True
+    assert chassis.state.block_reason == "translation_blind"
+
+    # 7. 50 Hz Closed-Loop 2D Plant Simulation from (80, 100, 350°) -> (260, 320, 15°)
+    def _run_plant_sim(stop_on_arrival: bool) -> tuple[ChassisPoseController, float, float, float, bool]:
+        sim_ctrl = ChassisPoseController()
+        sim_ctrl.set_target(260.0, 320.0, 15.0, stop_on_arrival=stop_on_arrival)
+        px, py, ph = 80.0, 100.0, 350.0
+        dt_sim = 0.02
+        t_sim = 100.0
+        saw_instant_before_settle = False
+        for _ in range(400):  # up to 8 seconds at 50 Hz
+            p = _make_pose(px, py, ph, monotonic_time=t_sim)
+            vx_cmd, vy_cmd, w_cmd = sim_ctrl.update(p, dt=dt_sim, now=t_sim)
+            if sim_ctrl.state.at_target_instant and not sim_ctrl.is_at_target():
+                saw_instant_before_settle = True
+            # Simple holonomic velocity plant (~150 cm/s @ 1000 cmd, ~180 deg/s @ 1000 omega)
+            lin_scale = 0.15
+            ang_scale = 0.18
+            th_rad = math.radians(ph)
+            v_fwd = vx_cmd * lin_scale
+            v_right = vy_cmd * lin_scale
+            dx_field = v_fwd * math.sin(th_rad) + v_right * math.cos(th_rad)
+            dy_field = v_fwd * math.cos(th_rad) - v_right * math.sin(th_rad)
+            px += dx_field * dt_sim
+            py += dy_field * dt_sim
+            ph = (ph + (w_cmd * ang_scale) * dt_sim) % 360.0
+            t_sim += dt_sim
+            if sim_ctrl.is_at_target():
+                break
+        return sim_ctrl, px, py, ph, saw_instant_before_settle
+
+    sim_stop_ctrl, sx, sy, sh, saw_pre_settle = _run_plant_sim(stop_on_arrival=True)
+    assert saw_pre_settle is True
+    assert sim_stop_ctrl.is_at_target() is True
+    assert sim_stop_ctrl.enabled is False
+    assert sim_stop_ctrl.state.block_reason == "arrived"
+    assert (sim_stop_ctrl.state.cmd_vx, sim_stop_ctrl.state.cmd_vy, sim_stop_ctrl.state.cmd_omega) == (0, 0, 0)
+    assert math.hypot(260.0 - sx, 320.0 - sy) <= ChassisPIDConfig.POS_TOLERANCE_CM
+    assert abs(wrap_angle_deg(15.0 - sh)) <= ChassisPIDConfig.HEADING_TOLERANCE_DEG
+
+    sim_hold_ctrl, _, _, _, _ = _run_plant_sim(stop_on_arrival=False)
+    assert sim_hold_ctrl.is_at_target() is True
+    assert sim_hold_ctrl.enabled is True
+
+    # 8. step_chassis_control match-mode and E-Stop gating with dry-run UARTComm
+    with UARTComm(dry_run=True) as dry_uart:
+        match_mgr = MatchManager()
+        pose_est = PoseEstimator()
+        pose_est.update_from_mm(3000, 2000, 2000, 0.0)  # (200, 200, 0)
+        ch_ctrl = ChassisPoseController()
+        last_drv = (0, 0, 0)
+
+        # DISARMED blocks and stops
+        ch_ctrl.set_target(250.0, 250.0, 0.0)
+        last_drv = step_chassis_control(ch_ctrl, dry_uart, match_mgr, pose_est, last_drv)
+        assert last_drv == (0, 0, 0) and ch_ctrl.enabled is False
+
+        # PRACTICE drives actively
+        match_mgr.start_practice()
+        ch_ctrl.set_target(250.0, 250.0, 0.0)
+        last_drv = step_chassis_control(ch_ctrl, dry_uart, match_mgr, pose_est, last_drv)
+        assert last_drv != (0, 0, 0) and ch_ctrl.enabled is True
+
+        # TELEOP immediately stops and disables P2P
+        match_mgr.enable_teleop()
+        last_drv = step_chassis_control(ch_ctrl, dry_uart, match_mgr, pose_est, last_drv)
+        assert last_drv == (0, 0, 0) and ch_ctrl.enabled is False
+
+        # AUTO drives actively
+        match_mgr.disarm()
+        match_mgr.start_auto()
+        ch_ctrl.set_target(250.0, 250.0, 0.0)
+        last_drv = step_chassis_control(ch_ctrl, dry_uart, match_mgr, pose_est, last_drv)
+        assert last_drv != (0, 0, 0) and ch_ctrl.enabled is True
+
+        # E-Stop immediately stops and disables P2P
+        dry_uart.trigger_estop()
+        last_drv = step_chassis_control(ch_ctrl, dry_uart, match_mgr, pose_est, last_drv)
+        assert last_drv == (0, 0, 0) and ch_ctrl.enabled is False
+
+    print("All ChassisPoseController tests PASSED!")

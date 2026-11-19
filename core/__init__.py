@@ -5,10 +5,13 @@ Contains hardware communication, packet protocols, and field pose estimation.
 
 from core.comms import CmdType, Packet, PacketParser, PartType, UARTComm
 from core.control import (
+    ChassisControlState,
+    ChassisPoseController,
     ConveyorControlState,
     ConveyorController,
     ShooterControlState,
     ShooterSpeedController,
+    step_chassis_control,
     step_conveyor_control,
     step_shooter_control,
 )
@@ -24,10 +27,13 @@ __all__ = [
     "PacketParser",
     "PartType",
     "UARTComm",
+    "ChassisControlState",
+    "ChassisPoseController",
     "ConveyorControlState",
     "ConveyorController",
     "ShooterControlState",
     "ShooterSpeedController",
+    "step_chassis_control",
     "step_conveyor_control",
     "step_shooter_control",
     "ESP32SensorReceiver",
@@ -44,4 +50,3 @@ __all__ = [
     "VisionManager",
     "VisionTarget",
 ]
-

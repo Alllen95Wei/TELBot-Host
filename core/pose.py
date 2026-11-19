@@ -2,7 +2,7 @@ import math
 import sys
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -39,6 +39,7 @@ class PoseEstimate:
     front_status: str
     valid: bool
     timestamp: float
+    monotonic_time: float = field(default_factory=time.monotonic)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -443,6 +444,7 @@ class PoseEstimator:
                 front_status=front_status,
                 valid=(x_cm is not None and y_cm is not None),
                 timestamp=time.time(),
+                monotonic_time=time.monotonic(),
             )
             self._latest_pose = estimate
             return estimate

@@ -238,6 +238,31 @@ main.dashboard-main {
   border: 1px solid rgba(245, 158, 11, 0.55) !important;
 }
 
+/* Chassis P2P PID Status Chip States */
+.p2p-chip-driving {
+  background: rgba(56, 189, 248, 0.2) !important;
+  color: #38bdf8 !important;
+  border: 1px solid rgba(56, 189, 248, 0.55) !important;
+}
+
+.p2p-chip-arrived {
+  background: rgba(16, 185, 129, 0.2) !important;
+  color: #34d399 !important;
+  border: 1px solid rgba(16, 185, 129, 0.55) !important;
+}
+
+.p2p-chip-blind {
+  background: rgba(245, 158, 11, 0.22) !important;
+  color: #fbbf24 !important;
+  border: 1px solid rgba(245, 158, 11, 0.55) !important;
+}
+
+.p2p-chip-blocked {
+  background: rgba(239, 68, 68, 0.22) !important;
+  color: #f87171 !important;
+  border: 1px solid rgba(239, 68, 68, 0.55) !important;
+}
+
 /* 2D Field Pose Map Canvas */
 .field-map-wrap {
   display: flex;

@@ -428,6 +428,10 @@
                 <i id="pose-status-icon">radar</i>
                 <span id="pose-status-text">Awaiting Sensors</span>
               </span>
+              <span class="chip small" id="chassis-p2p-chip" title="Chassis Pose-to-Point PID Status">
+                <i id="chassis-p2p-icon">navigation</i>
+                <span id="chassis-p2p-text">P2P: Idle</span>
+              </span>
               <span class="chip small vision-chip-searching" id="vision-target-chip" title="Active 1x3 Autonomous Goal Target">
                 <i id="vision-target-icon">center_focus_weak</i>
                 <span id="vision-target-text">1x3: Unlatched</span>
@@ -810,6 +814,51 @@
             <i>clear</i>
             <span>Clear Goal</span>
           </button>
+        </div>
+
+        <div class="small-space"></div>
+
+        <div class="small-text bold" style="margin-bottom: 6px;">Chassis P2P Waypoint Test (Practice Mode Only)</div>
+        <div class="grid">
+          <div class="s4">
+            <label class="small-text">Target X (cm)</label>
+            <div class="field small border round no-margin">
+              <input type="number" id="sim-p2p-x-input" min="25" max="375" step="5" value="200" />
+            </div>
+          </div>
+          <div class="s4">
+            <label class="small-text">Target Y (cm)</label>
+            <div class="field small border round no-margin">
+              <input type="number" id="sim-p2p-y-input" min="25" max="475" step="5" value="250" />
+            </div>
+          </div>
+          <div class="s4">
+            <label class="small-text">Heading (&deg;)</label>
+            <div class="field small border round no-margin">
+              <input type="number" id="sim-p2p-heading-input" min="0" max="359" step="5" value="0" />
+            </div>
+          </div>
+        </div>
+        <div class="row wrap middle-align" style="margin-top: 8px; gap: 12px;">
+          <label class="checkbox small-text">
+            <input type="checkbox" id="sim-p2p-aim-goal-toggle" />
+            <span>Aim at Goal</span>
+          </label>
+          <label class="checkbox small-text">
+            <input type="checkbox" id="sim-p2p-stop-arrival-toggle" checked />
+            <span>Stop on Arrival</span>
+          </label>
+        </div>
+        <div class="row wrap middle-align" style="margin-top: 8px; gap: 6px;">
+          <button class="button small primary round" id="sim-p2p-goto-btn" title="Drive chassis autonomously to waypoint (Practice mode only)">
+            <i>navigation</i>
+            <span>Go To Waypoint</span>
+          </button>
+          <button class="button small border round" id="sim-p2p-cancel-btn" title="Cancel active Chassis P2P move">
+            <i>stop_circle</i>
+            <span>Cancel P2P</span>
+          </button>
+          <span class="mono small-text" id="sim-p2p-status-text">Idle (requires Practice mode)</span>
         </div>
       </article>
     </dialog>

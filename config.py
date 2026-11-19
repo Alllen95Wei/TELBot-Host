@@ -153,3 +153,43 @@ class ConveyorAutoReverse:
     NO_BALL_DELAY_S = 0.5      # Continuous no-ball time while shooting before auto-reverse triggers
     REVERSE_DURATION_S = 0.4   # Duration of each automatic reverse pulse
     COOLDOWN_S = 1.0           # Normal/forward dwell time before triggering another pulse if still no ball
+
+
+class ChassisPID:
+    """Closed-loop 3-DOF Pose-to-Point (P2P) PID configuration."""
+
+    CONTROL_LOOP_HZ = 50.0
+
+    # Conservative initial gains (tune on physical robot)
+    X_KP = 8.0
+    X_KI = 0.2
+    X_KD = 0.8
+
+    Y_KP = 8.0
+    Y_KI = 0.2
+    Y_KD = 0.8
+
+    HEADING_KP = 9.0
+    HEADING_KI = 0.1
+    HEADING_KD = 0.6
+
+    # Output caps ([-1000, +1000] scale) & optional stiction floor
+    MAX_LINEAR_SPEED = 600.0
+    MAX_ANGULAR_SPEED = 500.0
+    MIN_LINEAR_CMD = 0.0
+    MIN_ANGULAR_CMD = 0.0
+
+    # Anti-windup & derivative filtering
+    POS_I_ZONE_CM = 25.0
+    POS_MAX_INTEGRAL = 200.0
+    HEADING_I_ZONE_DEG = 15.0
+    HEADING_MAX_INTEGRAL = 150.0
+    D_FILTER_ALPHA = 0.3
+
+    # Arrival tolerances, settling, & safety timeouts
+    POS_TOLERANCE_CM = 5.0
+    HEADING_TOLERANCE_DEG = 3.0
+    SETTLE_TIME_S = 0.20
+    POSE_STALE_TIMEOUT_S = 0.5
+    MAX_BLIND_HOLD_S = 0.25
+    WALL_MARGIN_CM = 25.0

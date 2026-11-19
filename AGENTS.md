@@ -56,14 +56,15 @@ When Auto expires, the robot immediately stops all motors and enters `AUTO_WAIT`
   - Implemented `ConveyorController` & `step_conveyor_control` (`core/control.py`) to automatically reverse the feeder spinner for a short anti-jam pulse (`config.ConveyorAutoReverse`) whenever the shooter is running and `ball_detected` is `False`, without clobbering operator intent.
   - Updated `PART_SHOOTER` binary framing to 6 bytes (`<hhBB` full dual-flywheel + angle) and 4 bytes (`<hh` dual-flywheel only), and updated Pico W `Shooter.start_shoot(upper_speed, lower_speed)` + `UARTCommunicator.dispatch_packet()`.
   - Integrated the 50 Hz flywheel PID and conveyor auto-reverse loops with E-Stop and match phase gating into `main.py` (via `step_shooter_control` & `step_conveyor_control`), plus `/api/shooter/pid` and `/api/conveyor/auto_reverse` REST endpoints and `/ws/control` UI telemetry updates.
+- [x] **Chassis Pose-to-Point (P2P) PID Controller (`core/control.py`, `core/pose.py`, `config.py`, `main.py`, `web_panel/`)**:
+  - Implemented `ChassisControlState`, `ChassisPoseController`, and `step_chassis_control` (`core/control.py`) with 3 decoupled `PIDController` instances (`kv=0, ks=0, zero_on_zero_setpoint=False`, `angle_wrap=True` on heading only), direction-preserving vector speed cap, field-to-body velocity rotation, blind-LiDAR rotation fallback (`MAX_BLIND_HOLD_S`), monotonic pose staleness protection (`PoseEstimate.monotonic_time`), and dwell-settled `stop_on_arrival=True` behavior.
+  - Integrated 50 Hz `step_chassis_control` into `main.py` and standalone `web_panel/server.py` (gated to `MatchMode.AUTO` and `MatchMode.PRACTICE` with driver preemption on non-zero manual input), plus `/api/chassis/{pid,goto,cancel}` endpoints and 2D field map / Practice test modal controls in `web_panel/`.
 
 ## Undone Tasks
 
-1. **Chassis Pose-to-Point PID Controller (`core/control.py`)**:
-   - Closed-loop Chassis Pose-to-Point PID (`ChassisPoseController`) for autonomous field navigation — see [CHASSIS_P2P_PID.md](docs/CHASSIS_P2P_PID.md) for the complete design (`PRACTICE` + internal `AUTO` only, blind-LiDAR pauses translation while allowing heading rotation, `stop_on_arrival=True` by default).
-2. **ESP32 Sender Firmware Implementation (Planned)**:
+1. **ESP32 Sender Firmware Implementation (Planned)**:
    - Implement ESP32 firmware to read Upper/Lower flywheel RPMs, geomagnetic heading (deg), Front/Right/Left LiDAR distances (mm), and IR ball sensor state (`ball_detected`), pack the 26-byte `<hhhIIIB` frame with CRC-8 (`0x07`), and transmit at 50 Hz over 115200 baud UART to RPi 5 — see [ESP32.md](docs/ESP32.md) for full wire protocol & reference C++ sender code.
-3. **Autonomous Routine Storage & Workflow**:
+2. **Autonomous Routine Storage & Workflow**:
    - Sequence runner executing fixed steps during the 1:00 Auto phase (e.g. drive to point $\to$ align $\to$ spin up flywheels $\to$ feed balls), authored via an interactive **Web UI editor** (backed by structured JSON routine definitions on the Host).
 
 ---
@@ -80,7 +81,7 @@ When Auto expires, the robot immediately stops all motors and enters `AUTO_WAIT`
   - Continuous angle wrapping for heading control across $0^\circ / 360^\circ$ boundary.
   - Immediate `reset()` when target is 0 or subsystem is stopped.
 
-## 2. Chassis Pose-to-Point PID (`ChassisPoseController` in `core/control.py`) — [TODO — Plan in [CHASSIS_P2P_PID.md](docs/CHASSIS_P2P_PID.md)]
+## 2. Chassis Pose-to-Point PID (`ChassisPoseController` in `core/control.py`) — [DONE — Plan in [CHASSIS_P2P_PID.md](docs/CHASSIS_P2P_PID.md)]
 - **Inputs**: Current field pose $(x_{\text{cm}}, y_{\text{cm}}, \theta_{\text{deg}})$ from `PoseEstimator.latest_pose`.
 - **Target**: `(target_x_cm, target_y_cm, target_heading_deg)` (with `stop_on_arrival=True` by default).
 - **3 Independent Axes**:
@@ -112,12 +113,13 @@ When Auto expires, the robot immediately stops all motors and enters `AUTO_WAIT`
 - **Pico W `Shooter` Subsystem**: Updated `start_shoot(upper_speed: float, lower_speed: float | None = None)` and `UARTCommunicator.dispatch_packet()` to drive `upper_flywheel` and `lower_flywheel` independently.
 
 ## 5. Host Integration & Web UI
-- **Control Loop in `main.py` [DONE for Flywheel PID]**: 50 Hz control tick (`step_shooter_control`) coordinating dual flywheel PID, match phase gating, and UART transmissions (`ChassisPoseController` pending).
+- **Control Loop in `main.py` [DONE]**: 50 Hz control ticks (`step_shooter_control`, `step_conveyor_control`, and `step_chassis_control`) coordinating dual flywheel PID, conveyor anti-jam reverse, chassis P2P PID, match phase gating, and UART transmissions.
 - **Web Console [DONE]**:
   - Single shared speed control (slider + Cross Pad D-pad `4`/`20` step adjustment).
   - Mode toggle: Auto (Distance) vs. Manual.
   - Telemetry readouts for target distance, target RPM, and live upper/lower RPMs.
   - `#battery-text` indicator displaying current shooter speed percentage.
+  - Live 2D field map chassis P2P waypoint/path overlay, `#chassis-p2p-chip` status badge, and Practice-only waypoint test controls in `#simulator-modal`.
 
 ---
 
